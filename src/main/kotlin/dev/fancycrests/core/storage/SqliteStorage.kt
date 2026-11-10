@@ -276,7 +276,7 @@ class SqliteStorage(
                 val rows = connection.prepareStatement(
                     """
                     INSERT INTO player_state (uuid, prefixes, suffixes, nickname, revision)
-                    VALUES (?, ?, ?, ?, 1)
+                    VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT(uuid) DO UPDATE SET
                         prefixes = excluded.prefixes,
                         suffixes = excluded.suffixes,
@@ -289,7 +289,12 @@ class SqliteStorage(
                     statement.setString(2, encodeIds(state.prefixes))
                     statement.setString(3, encodeIds(state.suffixes))
                     statement.setString(4, state.nickname)
-                    statement.setLong(5, expectedRevision)
+                    // Both the INSERT branch (row deleted out-of-band) and the
+                    // UPDATE branch must land on expectedRevision + 1, or the
+                    // reported new revision and the stored row diverge and the
+                    // next save conflicts forever.
+                    statement.setLong(5, expectedRevision + 1)
+                    statement.setLong(6, expectedRevision)
                     statement.executeUpdate()
                 }
                 if (rows == 1) {
