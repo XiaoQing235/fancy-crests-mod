@@ -10,6 +10,8 @@ import dev.fancycrests.core.permission.NodeDefaults
 import net.minecraft.commands.CommandSourceStack
 import net.minecraft.commands.SharedSuggestionProvider
 import net.minecraft.network.chat.Component
+import net.minecraft.server.permissions.LevelBasedPermissionSet
+import net.minecraft.server.permissions.PermissionSet
 
 /** Result of resolving a command target (UUID or exact real player name). */
 sealed interface TargetResolution {
@@ -23,8 +25,12 @@ sealed interface TargetResolution {
  *
  * Permission evaluation for players goes through the core permission service
  * (explicit deny → explicit allow → documented node default, including the
- * op-level-2 fallback for admin nodes). The console is allowed on admin nodes
- * but cannot run player-only commands (menu/equip/nickname).
+ * op-level-2 fallback for admin nodes). Non-player sources (console/RCON,
+ * command blocks, datapack functions) are held to the vanilla convention:
+ * admin nodes require the source's own permission level to meet the node's
+ * documented operator level — console/RCON run at level 4, command blocks
+ * and datapack functions default to level 2. Player-only commands
+ * (menu/equip/nickname) never accept non-player sources.
  */
 object CommandSupport {
 
@@ -43,8 +49,9 @@ object CommandSupport {
     fun hasPermission(source: CommandSourceStack, core: CoreServices, node: String): Boolean {
         val player = source.player
         return if (player == null) {
-            // Console: admin nodes allowed; player-only nodes need a player.
-            NodeDefaults.policyFor(node)?.type == dev.fancycrests.core.permission.DefaultPolicyType.OP_LEVEL
+            // Non-player source: admin nodes only, and only when the source's
+            // own permission level meets the node's documented default level.
+            nonPlayerAllowed(permissionLevel(source.permissions()), node)
         } else {
             core.permissionManager.check(player.gameProfile.id(), node) == PermissionVerdict.ALLOW
         }
@@ -125,6 +132,33 @@ object CommandSupport {
         Permissions.VALIDATE,
         Permissions.DIAGNOSE,
     )
+}
+
+/**
+ * Pure gate for non-player sources (unit-testable without a
+ * [CommandSourceStack]): an OP_LEVEL node is available when the source's
+ * own permission level meets *that node's* documented operator level (per
+ * [NodeDefaults], not a fixed number); player-only and deny-by-default nodes
+ * are never available to non-player sources, and unknown nodes stay denied.
+ * Console/RCON sources run at level 4 and pass every admin node; command
+ * blocks and datapack functions default to level 2.
+ */
+internal fun nonPlayerAllowed(sourceLevel: Int, node: String): Boolean {
+    val policy = NodeDefaults.policyFor(node) ?: return false
+    return policy.type == dev.fancycrests.core.permission.DefaultPolicyType.OP_LEVEL &&
+        sourceLevel >= policy.opLevel
+}
+
+/**
+ * Maps a vanilla permission set to its numeric operator level (0..4);
+ * 26.2 replaced hasPermission(int) with [PermissionSet] (ALL_PERMISSIONS
+ * means 4, level-based sets carry their [LevelBasedPermissionSet.level] id).
+ * Mirrors MinecraftServerAdapter.operatorLevel.
+ */
+internal fun permissionLevel(permissions: PermissionSet): Int = when {
+    permissions == PermissionSet.ALL_PERMISSIONS -> 4
+    permissions is LevelBasedPermissionSet -> permissions.level().id()
+    else -> 0
 }
 
 // Top-level feedback extensions (usable unqualified from the command tree).
