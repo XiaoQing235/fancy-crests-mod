@@ -9,8 +9,10 @@ rendered to **vanilla clients** (no client-side mod required) via virtual
 - Command roots: `/fancycrests`, `/names`, `/customnames`
 - Build artifact base name: `FancyCrests`
 
-Status: **scaffold (P0)** — toolchain and project skeleton only. Feature work
-follows the phased plan (P0 → P5) in the development plan document.
+Status: **pre-release** — P0–P4 are implemented (toolchain, render channel, core
+services, GUI and dynamic templates, optional integrations). P5 acceptance is
+still open: client-side rendering verification with vanilla 26.2 clients,
+performance evidence and the release package.
 
 ## Toolchain (locked versions)
 
