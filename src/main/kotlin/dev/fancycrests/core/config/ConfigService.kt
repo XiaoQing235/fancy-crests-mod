@@ -74,8 +74,9 @@ data class TemplateSegment(
 data class SecondLineCondition(val dimension: String?, val permission: String?)
 
 /**
- * Admin-configured second-line rule. P2 templates are static text parsed with
- * [LegacyTextParser]; dynamic placeholders arrive in P3.
+ * Admin-configured second-line rule. The template mixes static text (§ codes)
+ * with built-in `%fancycrests:key%` placeholders; [refreshTicks] controls how
+ * often dynamic templates are re-resolved.
  */
 data class SecondLineRuleConfig(
     val id: String,
@@ -83,7 +84,24 @@ data class SecondLineRuleConfig(
     val priority: Int,
     val condition: SecondLineCondition?,
     val template: String,
-)
+    /**
+     * Dynamic-content refresh period in server ticks, inclusive bounds
+     * [MIN_REFRESH_TICKS]..[MAX_REFRESH_TICKS]. Only affects placeholder
+     * re-resolution; eligibility and lifecycle events stay immediate.
+     */
+    val refreshTicks: Int = DEFAULT_REFRESH_TICKS,
+) {
+    companion object {
+        const val MIN_REFRESH_TICKS = 1
+        const val MAX_REFRESH_TICKS = 72000
+
+        /** 1 second at 20 tps. */
+        const val DEFAULT_REFRESH_TICKS = 20
+
+        /** Hard cap on raw template text length (rendered output is capped separately). */
+        const val MAX_TEMPLATE_LENGTH = 1024
+    }
+}
 
 /** Raw offset triple from config; converted to [dev.fancycrests.api.RenderOffset] after validation. */
 data class OffsetConfig(val x: Double, val y: Double, val z: Double)
@@ -363,6 +381,20 @@ class ConfigService(
                     "'${rule.condition.dimension}' is not a valid dimension identifier",
                 )
             }
+            if (rule.template.length > SecondLineRuleConfig.MAX_TEMPLATE_LENGTH) {
+                errors += ConfigError(
+                    "secondLineRules[$index].template",
+                    "must not exceed ${SecondLineRuleConfig.MAX_TEMPLATE_LENGTH} characters " +
+                        "(was ${rule.template.length})",
+                )
+            }
+            if (rule.refreshTicks !in SecondLineRuleConfig.MIN_REFRESH_TICKS..SecondLineRuleConfig.MAX_REFRESH_TICKS) {
+                errors += ConfigError(
+                    "secondLineRules[$index].refreshTicks",
+                    "must be an integer between ${SecondLineRuleConfig.MIN_REFRESH_TICKS} and " +
+                        "${SecondLineRuleConfig.MAX_REFRESH_TICKS} inclusive (was ${rule.refreshTicks})",
+                )
+            }
         }
 
         val render = root.render
@@ -407,7 +439,7 @@ class ConfigService(
     // JSON mapping (manual, path preserving)
     // ------------------------------------------------------------------
 
-    private class ConfigParseException(val errors: List<ConfigError>) : RuntimeException("config parse failed")
+    internal class ConfigParseException(val errors: List<ConfigError>) : RuntimeException("config parse failed")
 
     fun parseConfig(root: JsonObject): FancyCrestsConfig {
         val errors = mutableListOf<ConfigError>()
@@ -517,6 +549,14 @@ class ConfigService(
                 priority = obj.int("priority", 0, "$path.priority", errors),
                 condition = condition,
                 template = obj.string("template", "", "$path.template", errors) ?: "",
+                refreshTicks = obj.strictInt(
+                    member = "refreshTicks",
+                    default = SecondLineRuleConfig.DEFAULT_REFRESH_TICKS,
+                    path = "$path.refreshTicks",
+                    errors = errors,
+                    min = SecondLineRuleConfig.MIN_REFRESH_TICKS,
+                    max = SecondLineRuleConfig.MAX_REFRESH_TICKS,
+                ),
             )
         }
 
@@ -595,6 +635,37 @@ class ConfigService(
         if (element is JsonPrimitive && element.isNumber) return element.asInt
         errors += ConfigError(path, "must be an integer")
         return default
+    }
+
+    /**
+     * Strict integer parse used for range-checked fields: rejects non-numbers,
+     * fractional numbers and values outside [min]..[max], always reporting the
+     * exact JSON path (never silently rewriting user input).
+     */
+    private fun JsonObject.strictInt(
+        member: String,
+        default: Int,
+        path: String,
+        errors: MutableList<ConfigError>,
+        min: Int,
+        max: Int,
+    ): Int {
+        val element = get(member) ?: return default
+        val primitive = element as? JsonPrimitive
+        if (primitive == null || !primitive.isNumber) {
+            errors += ConfigError(path, "must be an integer between $min and $max")
+            return default
+        }
+        val value = primitive.asDouble
+        val isIntegral = !value.isNaN() && kotlin.math.floor(value) == value
+        if (!isIntegral || value < min || value > max) {
+            errors += ConfigError(
+                path,
+                "must be an integer between $min and $max inclusive (was ${primitive.asString})",
+            )
+            return default
+        }
+        return value.toInt()
     }
 
     private fun JsonObject.double(member: String, default: Double, path: String, errors: MutableList<ConfigError>): Double {
