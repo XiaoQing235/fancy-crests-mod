@@ -125,9 +125,9 @@ class BuiltInBackend : PermissionBackend {
  * Permission resolution implementing [PermissionService].
  *
  * Evaluation order per node (plan chapter 1): explicit deny → explicit allow →
- * documented node default policy. Backends are consulted in order; the first
- * explicit verdict wins with DENY taking priority over ALLOW *within* one
- * backend (deny is checked first there too).
+ * documented node default policy. Every backend is consulted for an explicit
+ * verdict; DENY from any backend in the chain beats ALLOW from any other
+ * backend (and an explicit allow beats the node default).
  *
  * UNDEFINED is only returned for non-standard nodes without any explicit entry
  * and without a default policy — which cannot happen for the standard nodes.
@@ -163,14 +163,18 @@ class PermissionManager(
         (backendChain + dynamicBackends).map { it.name }
 
     override fun check(playerUuid: UUID, node: String): PermissionVerdict {
-        // 1. explicit verdicts, deny evaluated before allow in every backend
+        // 1. explicit verdicts. A deny from ANY backend wins over an allow from
+        // any other backend, so the documented "explicit deny is final" rule
+        // holds across the whole chain instead of only within one backend.
+        var allowed = false
         for (backend in backendChain + dynamicBackends) {
             when (backend.explicitVerdict(playerUuid, node)) {
                 PermissionVerdict.DENY -> return PermissionVerdict.DENY
-                PermissionVerdict.ALLOW -> return PermissionVerdict.ALLOW
+                PermissionVerdict.ALLOW -> allowed = true
                 PermissionVerdict.UNDEFINED -> Unit
             }
         }
+        if (allowed) return PermissionVerdict.ALLOW
         // 2. documented default policy
         return when (val policy = NodeDefaults.policyFor(node)) {
             null -> PermissionVerdict.UNDEFINED
