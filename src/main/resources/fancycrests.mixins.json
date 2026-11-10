@@ -3,7 +3,11 @@
 	"minVersion": "0.8",
 	"package": "dev.fancycrests.mixin",
 	"compatibilityLevel": "JAVA_25",
-	"mixins": [],
+	"mixins": [
+		"DisplayAccessor",
+		"TextDisplayAccessor",
+		"BillboardConstraintsAccessor"
+	],
 	"injectors": {
 		"defaultRequire": 1
 	},
