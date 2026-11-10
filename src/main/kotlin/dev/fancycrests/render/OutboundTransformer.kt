@@ -293,8 +293,10 @@ internal class OutboundTransformer(
         for (sub in packet.subPackets()) {
             val replacement = try {
                 transform(state, sub)
-            } catch (t: Throwable) {
-                RenderDiagnostics.recordError("bundle sub-transform", t)
+            } catch (e: Exception) {
+                // Exception (not Throwable): Errors propagate; sub-packet
+                // transformation failures degrade to passthrough.
+                RenderDiagnostics.recordError("bundle sub-transform", e)
                 null
             }
             if (replacement == null) {

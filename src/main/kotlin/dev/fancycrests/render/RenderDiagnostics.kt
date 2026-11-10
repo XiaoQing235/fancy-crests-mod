@@ -1,5 +1,7 @@
 package dev.fancycrests.render
 
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -10,10 +12,13 @@ import java.util.concurrent.atomic.AtomicLong
  * and the most recent error, rate-limited).
  *
  * Counters are plain atomics; gauges are maintained by [RenderService] as it
- * allocates/frees state. Errors are rate-limited to one record per window to
- * avoid per-tick log spam.
+ * allocates/frees state. Errors are logged (full stack trace) through slf4j,
+ * rate-limited to one log line per window to avoid per-tick log spam;
+ * [lastError] still records the most recent message for every error.
  */
 object RenderDiagnostics {
+
+    private val LOGGER: Logger = LoggerFactory.getLogger("FancyCrests/Render")
 
     /** Live targets (players with a published snapshot). */
     val targets = AtomicInteger(0)
@@ -50,13 +55,27 @@ object RenderDiagnostics {
     private var lastErrorNanos = 0L
     private val ERROR_WINDOW_NANOS = 5_000_000_000L // 5s
 
-    /** Records a render pipeline error; rate-limited per wall-clock window. */
+    /**
+     * Records a render pipeline error: full stack trace via a rate-limited
+     * LOGGER.warn (one line per 5s window, so a per-tick failure cannot
+     * flood the log) while [lastError] tracks the newest message for every
+     * occurrence, not just the logged ones. Errors (`java.lang.Error`) are
+     * not handled here at all: call sites catch `Exception` so that VM-level
+     * failures propagate instead of being swallowed as render noise.
+     */
     fun recordError(where: String, error: Throwable) {
-        synchronized(errorLock) {
-            val now = System.nanoTime()
-            if (now - lastErrorNanos < ERROR_WINDOW_NANOS) return
-            lastErrorNanos = now
-            lastError = "$where: $error"
+        val now = System.nanoTime()
+        val logAllowed = synchronized(errorLock) {
+            if (now - lastErrorNanos >= ERROR_WINDOW_NANOS) {
+                lastErrorNanos = now
+                true
+            } else {
+                false
+            }
+        }
+        lastError = "$where: $error"
+        if (logAllowed) {
+            LOGGER.warn("Render pipeline error in {}", where, error)
         }
     }
 

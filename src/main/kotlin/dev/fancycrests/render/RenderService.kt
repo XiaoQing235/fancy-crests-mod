@@ -674,7 +674,7 @@ internal class RenderService(initialSettings: RenderSettings) {
                 spawnPackets + metadataPackets + listOf(mount),
             )
             RenderDiagnostics.entitiesSent.addAndGet(spawnPackets.size.toLong())
-        } catch (t: Throwable) {
+        } catch (t: Exception) {
             // Send failed: do not keep the labels recorded as generated.
             RenderDiagnostics.recordError("label spawn", t)
             state.targets.remove(target.uuid)
@@ -692,7 +692,7 @@ internal class RenderService(initialSettings: RenderSettings) {
         try {
             sendPacket(listener, PassengerPackets.create(vehicleId, realPassengers.toIntArray()))
             sendPacket(listener, ClientboundRemoveEntitiesPacket(*obs.liveLabelIds().toIntArray()))
-        } catch (t: Throwable) {
+        } catch (t: Exception) {
             RenderDiagnostics.recordError("label cleanup", t)
         }
     }
@@ -710,7 +710,7 @@ internal class RenderService(initialSettings: RenderSettings) {
                     PassengerMerge.merge(realPassengers, obs.liveLabelIds()).toIntArray(),
                 ),
             )
-        } catch (t: Throwable) {
+        } catch (t: Exception) {
             RenderDiagnostics.recordError("passenger remount", t)
         }
     }
@@ -820,7 +820,7 @@ internal class RenderService(initialSettings: RenderSettings) {
                             val live = player.passengers.map { it.id }
                             obs.lastRealPassengers = live
                             sendMergedPassengers(listener, obs, live)
-                        } catch (t: Throwable) {
+                        } catch (t: Exception) {
                             RenderDiagnostics.recordError("second line spawn", t)
                             obs.secondLineId = 0
                         }
@@ -835,7 +835,7 @@ internal class RenderService(initialSettings: RenderSettings) {
                             if (target.labelIds.secondLineId == removed) {
                                 target.labelIds.secondLineId = 0
                             }
-                        } catch (t: Throwable) {
+                        } catch (t: Exception) {
                             RenderDiagnostics.recordError("second line removal", t)
                         }
                     }

@@ -59,8 +59,10 @@ object RenderPackets {
         if (listener !is ServerGamePacketListenerImpl) return null
         return try {
             service.transformForConnection(listener, packet)
-        } catch (t: Throwable) {
-            RenderDiagnostics.recordError("outbound transform ${packet.type()}", t)
+        } catch (e: Exception) {
+            // Exception (not Throwable): java.lang.Error must propagate and
+            // crash the tick rather than being masked as render noise.
+            RenderDiagnostics.recordError("outbound transform ${packet.type()}", e)
             null // fail open: deliver the original packet untouched
         }
     }
@@ -71,22 +73,48 @@ object RenderPackets {
      * attached to the last packet of the list only (a netty future listener
      * is single-shot; re-attaching it to every packet would fire it multiple
      * times).
+     *
+     * The caller already cancelled the original send, so an exception here
+     * must not escape into the vanilla call site: it is recorded and, when
+     * nothing had been delivered yet, the untouched original packet
+     * ([fallback]) is sent as a last resort so the packet is not lost. A
+     * partial failure (some replacements already on the wire) does not
+     * re-send the original: re-delivering a packet whose rebuild was already
+     * partially applied could double-apply team/entity state client-side.
      */
     @JvmStatic
     fun sendBypassing(
         listener: ServerCommonPacketListenerImpl,
         packets: List<Packet<*>>,
         originalListener: io.netty.channel.ChannelFutureListener?,
+        fallback: Packet<*>? = null,
     ) {
         val old = bypass.get()
         bypass.set(true)
         try {
-            for ((index, packet) in packets.withIndex()) {
-                val isLast = index == packets.size - 1
-                if (originalListener == null || !isLast) {
-                    listener.send(packet)
-                } else {
-                    listener.send(packet, originalListener)
+            var sent = 0
+            try {
+                for ((index, packet) in packets.withIndex()) {
+                    val isLast = index == packets.size - 1
+                    if (originalListener == null || !isLast) {
+                        listener.send(packet)
+                    } else {
+                        listener.send(packet, originalListener)
+                    }
+                    sent++
+                }
+            } catch (e: Exception) {
+                RenderDiagnostics.recordError("bypassed resend", e)
+                if (fallback != null && sent == 0) {
+                    try {
+                        if (originalListener == null) {
+                            listener.send(fallback)
+                        } else {
+                            listener.send(fallback, originalListener)
+                        }
+                    } catch (e2: Exception) {
+                        RenderDiagnostics.recordError("bypassed fallback send", e2)
+                    }
                 }
             }
         } finally {

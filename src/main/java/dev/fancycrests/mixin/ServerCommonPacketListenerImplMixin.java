@@ -54,6 +54,11 @@ public abstract class ServerCommonPacketListenerImplMixin {
             return;
         }
         ci.cancel();
-        RenderPackets.sendBypassing(self, replacement, listener);
+        // The original packet is handed to the resend as a fallback: the
+        // cancel already consumed the vanilla call, so a throwing resend
+        // must still deliver something rather than dropping the packet (and
+        // must not propagate into the vanilla send site as a "successful"
+        // cancelled call that threw afterwards).
+        RenderPackets.sendBypassing(self, replacement, listener, packet);
     }
 }
