@@ -58,9 +58,14 @@ internal class RenderService(initialSettings: RenderSettings) {
     val targets = ConcurrentHashMap<UUID, TargetRenderState>()
 
     private val transformer = OutboundTransformer(onObserverStateClosed = { targetUuid ->
-        val target = targets[targetUuid]
-        if (target != null && target.observerCount > 0) {
-            target.observerCount -= 1
+        val target = targets[targetUuid] ?: return@OutboundTransformer
+        // Guarded decrement: never dip below zero even if a disconnect-side
+        // decrement already ran for this relation (both paths may fire for
+        // the same observer state in disconnect races).
+        val previous = target.observerCount.getAndUpdate { current ->
+            if (current > 0) current - 1 else current
+        }
+        if (previous > 0) {
             RenderDiagnostics.trackingRelations.decrementAndGet()
         }
     })
@@ -413,7 +418,7 @@ internal class RenderService(initialSettings: RenderSettings) {
             if (target.currentEntityId != player.id) {
                 onTargetEntityReplaced(player)
             }
-            if (target.observerCount <= 0) continue
+            if (target.observerCount.get() <= 0) continue
             val sneaking = player.isShiftKeyDown
             val realPassengers = player.passengers.map { it.id }
             val passengersChanged = realPassengers != target.lastRealPassengers
@@ -735,10 +740,8 @@ internal class RenderService(initialSettings: RenderSettings) {
     // =================================================================
 
     private fun adjustRelation(target: TargetRenderState?, delta: Int) {
-        if (target != null) target.observerCount += delta
-        if (delta < 0) {
-            RenderDiagnostics.trackingRelations.addAndGet(delta)
-        } else if (delta > 0) {
+        if (target != null) target.observerCount.addAndGet(delta)
+        if (delta != 0) {
             RenderDiagnostics.trackingRelations.addAndGet(delta)
         }
     }

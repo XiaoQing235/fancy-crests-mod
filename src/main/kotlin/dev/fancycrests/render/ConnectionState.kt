@@ -6,6 +6,7 @@ import net.minecraft.network.chat.Component
 import net.minecraft.network.protocol.Packet
 import net.minecraft.server.network.ServerGamePacketListenerImpl
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Per-player team overlay state on one connection: the virtual team name and
@@ -104,8 +105,17 @@ internal class TargetRenderState(
     @JvmField val labelIds: LabelEntityIds = LabelEntityIds(),
     @JvmField var sneaking: Boolean = false,
     @JvmField var lastRealPassengers: List<Int> = emptyList(),
-    /** Number of connections currently holding labels for this target. */
-    @JvmField var observerCount: Int = 0,
+    /**
+     * Number of connections currently holding labels for this target.
+     *
+     * Atomic: mutated from the server main thread (tracking events, spawn,
+     * end-tick) and from the netty thread via disconnect handling; a plain
+     * Int `+=`/`-=` loses updates and would leave the `observerCount <= 0`
+     * gate in [RenderService.onEndTick] stuck (or polling forever) after a
+     * lost decrement/increment race.
+     */
+    @JvmField
+    val observerCount: AtomicInteger = AtomicInteger(0),
 )
 
 /**
