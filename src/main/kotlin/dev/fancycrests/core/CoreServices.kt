@@ -1,6 +1,7 @@
 package dev.fancycrests.core
 
 import dev.fancycrests.api.HeadDisplayChannel
+import dev.fancycrests.api.PlayerTitleState
 import dev.fancycrests.core.catalog.CatalogReplaceResult
 import dev.fancycrests.core.catalog.CatalogService
 import dev.fancycrests.core.config.ConfigLoadResult
@@ -77,6 +78,14 @@ class CoreServices(
     lateinit var selectionService: SelectionService
         private set
 
+    /** Built-in placeholder registry (P3); shared by templates and export adapters. */
+    lateinit var placeholderService: dev.fancycrests.core.refresh.PlaceholderServiceImpl
+        private set
+
+    private lateinit var templateEngine: dev.fancycrests.core.refresh.TemplateEngine
+    private lateinit var refreshScheduler: dev.fancycrests.core.refresh.RefreshScheduler
+    private lateinit var channelManager: dev.fancycrests.core.channel.ChannelManager
+
     private lateinit var storage: SqliteStorage
 
     /** The adapter injected at [start]; used by the command layer. */
@@ -132,12 +141,24 @@ class CoreServices(
 
         // ---- events & resolution -------------------------------------
         eventBus = TitleEventBus(mainExecutor)
-        snapshotResolver = SnapshotResolver(catalogService, permissionManager) { configService.current }
+        placeholderService = dev.fancycrests.core.refresh.PlaceholderServiceImpl()
+        templateEngine = dev.fancycrests.core.refresh.TemplateEngine(placeholderService)
+        snapshotResolver = SnapshotResolver(catalogService, permissionManager, { configService.current }, templateEngine)
         snapshotPublisher = SnapshotPublisher(
             snapshotResolver,
             adapter,
             { configService.current },
             headChannelProvider,
+        )
+        // Built-in placeholders read published immutable state only; the
+        // state lookup defers to selectionService, which is created below.
+        dev.fancycrests.core.refresh.registerStandardPlaceholders(
+            service = placeholderService,
+            engine = templateEngine,
+            stateOf = { uuid -> stateOfPlayer(uuid) },
+            viewOf = { uuid -> snapshotPublisher.latestView(uuid) },
+            catalogOf = { catalogService },
+            configOf = { configService.current },
         )
 
         // ---- storage --------------------------------------------------
@@ -180,8 +201,25 @@ class CoreServices(
         // Config replacement cascades: catalog swap, grants, online recheck.
         configService.addOnReplaced { newConfig -> onConfigReplaced(newConfig) }
 
+        // ---- dynamic second line & export channels (P3) ----------------
+        refreshScheduler = dev.fancycrests.core.refresh.RefreshScheduler(
+            adapter = adapter,
+            configProvider = { configService.current },
+            resolver = snapshotResolver,
+            stateOf = { uuid -> stateOfPlayer(uuid) },
+            publisher = snapshotPublisher,
+        )
+        channelManager = dev.fancycrests.core.channel.ChannelManager(
+            adapter = adapter,
+            resolver = snapshotResolver,
+            stateOf = { uuid -> stateOfPlayer(uuid) },
+            eventBus = eventBus,
+        )
+
         // ---- head channel ---------------------------------------------
         applyHeadChannel(initialConfig, startOrStop = true)
+        refreshScheduler.rebuild()
+        channelManager.apply(initialConfig)
 
         started = true
         logger.info(
@@ -196,6 +234,16 @@ class CoreServices(
     /** Shuts services down and releases background threads. */
     fun stop() {
         if (!started) return
+        try {
+            channelManager.stop()
+        } catch (e: Exception) {
+            logger.warn("Channel manager stop failed", e)
+        }
+        try {
+            refreshScheduler.stop()
+        } catch (e: Exception) {
+            logger.warn("Refresh scheduler stop failed", e)
+        }
         try {
             if (channelStartedByUs) {
                 headChannelProvider()?.stop()
@@ -225,11 +273,13 @@ class CoreServices(
     /** Login hook for the integration layer. */
     fun onPlayerJoin(uuid: UUID) {
         selectionService.handlePlayerJoin(uuid)
+        channelManager.onPlayerJoin(uuid)
     }
 
     /** Logout hook for the integration layer. */
     fun onPlayerQuit(uuid: UUID) {
         selectionService.handlePlayerQuit(uuid)
+        channelManager.onPlayerQuit(uuid)
     }
 
     /** Diagnostics snapshot for /fancycrests diagnose. */
@@ -258,6 +308,10 @@ class CoreServices(
         builtInBackend.reload(newConfig.permissions.nodes)
         // Head channel toggles / render settings.
         applyHeadChannel(newConfig, startOrStop = true)
+        // Dynamic refresh schedule: replaced periods are cancelled by rebuild.
+        refreshScheduler.rebuild()
+        // Chat / tab channel switches take effect on reload.
+        channelManager.apply(newConfig)
         // Re-check every online player: stale ids (removed/renamed titles,
         // lost eligibility) are unequipped and persisted.
         selectionService.revalidateOnline("config-reloaded")
@@ -269,6 +323,11 @@ class CoreServices(
             )
         }
     }
+
+    /** Current selection state; safe once the selection service exists. */
+    private fun stateOfPlayer(uuid: UUID): PlayerTitleState =
+        if (this::selectionService.isInitialized) selectionService.stateOf(uuid)
+        else PlayerTitleState(uuid, emptyList(), emptyList(), null, 0)
 
     private fun applyHeadChannel(config: FancyCrestsConfig, startOrStop: Boolean) {
         val channel = headChannelProvider() ?: return

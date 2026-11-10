@@ -54,6 +54,25 @@ interface ServerAdapter {
      * occupy another known player's real name").
      */
     fun knownPlayerNames(): Map<String, UUID>
+
+    /**
+     * Sends a system chat message to the online player [uuid]; a noop when
+     * the player is offline. Any thread (dispatched to the main thread).
+     */
+    fun sendSystemMessage(uuid: UUID, message: net.minecraft.network.chat.Component)
+
+    /**
+     * Broadcasts a tab-list display-name override for [uuid] to every online
+     * client; `null` restores the default profile name. Main thread.
+     */
+    fun broadcastTabListDisplayName(uuid: UUID, displayName: net.minecraft.network.chat.Component?)
+
+    /**
+     * Registers a callback executed at the end of every server tick. The
+     * returned handle deactivates the callback when closed (fabric events
+     * cannot unregister, so the registration stays but becomes a noop).
+     */
+    fun registerEndTickHandler(handler: () -> Unit): AutoCloseable
 }
 
 /**
@@ -100,5 +119,54 @@ class MinecraftServerAdapter(private val server: net.minecraft.server.MinecraftS
             names[profile.name().lowercase()] = profile.id()
         }
         return names
+    }
+
+    override fun sendSystemMessage(uuid: UUID, message: net.minecraft.network.chat.Component) {
+        execute { server.playerList.getPlayer(uuid)?.sendSystemMessage(message) }
+    }
+
+    override fun broadcastTabListDisplayName(
+        uuid: UUID,
+        displayName: net.minecraft.network.chat.Component?,
+    ) {
+        val player = server.playerList.getPlayer(uuid) ?: return
+        // 26.2 exposes no ServerPlayer tab-list display name setter and the
+        // player-info packet constructors only accept live ServerPlayers (the
+        // entry then reads getTabListDisplayName() == null). The public record
+        // Entry constructor allows custom display names, but the packet's own
+        // entries field is private, so the packet is rebuilt through its
+        // public STREAM_CODEC: hand-write the wire format (enum set, entry
+        // count, UUID, nullable component) and decode it into a packet.
+        val buf = net.minecraft.network.RegistryFriendlyByteBuf(
+            io.netty.buffer.Unpooled.buffer(),
+            server.registryAccess(),
+        )
+        try {
+            buf.writeEnumSet(
+                java.util.EnumSet.of(
+                    net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket.Action.UPDATE_DISPLAY_NAME,
+                ),
+                net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket.Action::class.java,
+            )
+            buf.writeVarInt(1) // one entry
+            buf.writeUUID(player.gameProfile.id())
+            net.minecraft.network.FriendlyByteBuf.writeNullable(
+                buf,
+                displayName,
+                net.minecraft.network.chat.ComponentSerialization.TRUSTED_STREAM_CODEC,
+            )
+            val packet = net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket.STREAM_CODEC.decode(buf)
+            server.playerList.broadcastAll(packet)
+        } finally {
+            buf.release()
+        }
+    }
+
+    override fun registerEndTickHandler(handler: () -> Unit): AutoCloseable {
+        val active = java.util.concurrent.atomic.AtomicBoolean(true)
+        net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents.END_SERVER_TICK.register { _ ->
+            if (active.get()) handler()
+        }
+        return AutoCloseable { active.set(false) }
     }
 }
