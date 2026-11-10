@@ -23,6 +23,8 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.UUID
 import java.util.regex.Pattern
 import java.util.regex.PatternSyntaxException
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 
 /** Boolean channel switches; channels never implicitly enable each other. */
 data class ChannelsConfig(
@@ -195,6 +197,7 @@ class ConfigService(
     private val configFile: Path,
     private val mainExecutor: Executor,
 ) {
+    private val logger: Logger = LoggerFactory.getLogger("FancyCrests/Config")
     private val gson: Gson = GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create()
     private val ioExecutor: ExecutorService =
         Executors.newSingleThreadExecutor { thread -> Thread(thread, "fancycrests-config").apply { isDaemon = true } }
@@ -238,15 +241,31 @@ class ConfigService(
     /** Hot reload: background read + parse, main-thread validation and swap. */
     fun reloadAsync(callback: (ConfigLoadResult) -> Unit) {
         ioExecutor.execute {
-            val result = readParseAndValidate()
+            val read = try {
+                readParseAndValidate()
+            } catch (t: Throwable) {
+                logger.error("Config reload failed unexpectedly", t)
+                ConfigLoadResult.Failure(
+                    listOf(ConfigError("$", "reload failed: ${t.message ?: t.javaClass.simpleName}")),
+                )
+            }
             mainExecutor.execute {
-                val final = if (result is ConfigLoadResult.Success) {
-                    applyNewConfig(result.config)
-                    result
-                } else {
-                    result
+                var final: ConfigLoadResult = read
+                try {
+                    if (read is ConfigLoadResult.Success) {
+                        applyNewConfig(read.config)
+                        final = read
+                    }
+                } catch (t: Throwable) {
+                    // applyNewConfig already isolates its listeners; this is a
+                    // last resort so the callback always receives a result.
+                    logger.error("Config replacement failed; keeping previous reporting honest", t)
+                    final = ConfigLoadResult.Failure(
+                        listOf(ConfigError("$", "config replacement failed: ${t.message ?: t.javaClass.simpleName}")),
+                    )
+                } finally {
+                    callback(final)
                 }
-                callback(final)
             }
         }
     }
@@ -310,7 +329,14 @@ class ConfigService(
         versionCounter.incrementAndGet()
         val listeners = synchronized(replaceListeners) { replaceListeners.toList() }
         for (listener in listeners) {
-            listener(config)
+            // One misbehaving listener must not skip the remaining ones —
+            // especially the online revalidation that runs late in the chain
+            // (same per-listener isolation as TitleEventBus.firePost).
+            try {
+                listener(config)
+            } catch (t: Throwable) {
+                logger.error("Config replace listener threw; continuing with the remaining listeners", t)
+            }
         }
     }
 
