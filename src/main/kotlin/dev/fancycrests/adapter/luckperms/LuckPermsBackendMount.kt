@@ -148,6 +148,49 @@ internal class LuckPermsPermissionBackend(
  * markDirty + main-thread recheckNow via [ServerAdapter]. LP fires events on
  * its own async bus, so the recheck is always dispatched, never run inline.
  */
+
+/** Which players a LuckPerms change requires revalidating. */
+internal sealed interface RecheckScope {
+    /** A change scoped to one known user. */
+    data class One(val uuid: UUID) : RecheckScope
+
+    /** Inheritance or context subjects are opaque here: revalidate everyone online. */
+    data object AllOnline : RecheckScope
+}
+
+/**
+ * Pure decision (no LuckPerms types, so it is unit-testable without the
+ * optional dependency): a change attributable to a specific user rechecks
+ * that user; anything else (group node edits, unknown holders, non-user
+ * context subjects) is opaque and conservatively revalidates everyone.
+ */
+internal fun recheckScopeFor(subjectUuid: UUID?): RecheckScope =
+    if (subjectUuid != null) RecheckScope.One(subjectUuid) else RecheckScope.AllOnline
+
+/**
+ * Applies a [RecheckScope] through [ServerAdapter].
+ *
+ * [RecheckScope.AllOnline] snapshots the online list *inside* the
+ * main-thread task: LuckPerms events fire on LP's async bus, and reading
+ * playerList.players off-thread risks a ConcurrentModificationException
+ * (26.2 backs it with a plain ArrayList that the main thread mutates).
+ * markDirty itself is thread-safe either way.
+ */
+internal fun applyRecheckScope(adapter: ServerAdapter, permissions: PermissionManager, scope: RecheckScope) {
+    when (scope) {
+        is RecheckScope.One -> {
+            permissions.markDirty(scope.uuid)
+            adapter.execute { permissions.recheckNow(scope.uuid) }
+        }
+        RecheckScope.AllOnline -> adapter.execute {
+            for (uuid in adapter.onlinePlayerUuids()) {
+                permissions.markDirty(uuid)
+                permissions.recheckNow(uuid)
+            }
+        }
+    }
+}
+
 internal class LuckPermsEventBridge(
     private val luckPerms: LuckPerms,
     private val adapter: ServerAdapter,
@@ -208,23 +251,11 @@ internal class LuckPermsEventBridge(
     }
 
     private fun onUserChange(uuid: UUID) {
-        permissions.markDirty(uuid)
-        adapter.execute { permissions.recheckNow(uuid) }
+        applyRecheckScope(adapter, permissions, recheckScopeFor(uuid))
     }
 
     private fun onNodeMutate(event: NodeMutateEvent) {
-        val identifier = event.target.identifier
-        val uuid = uuidOfHolder(identifier)
-        if (uuid != null) {
-            onUserChange(uuid)
-        } else {
-            // Group (or unknown holder) changed: inheritance is opaque here,
-            // revalidate everyone online.
-            val online = adapter.onlinePlayerUuids()
-            if (online.isEmpty()) return
-            for (uuid in online) permissions.markDirty(uuid)
-            adapter.execute { for (uuid in online) permissions.recheckNow(uuid) }
-        }
+        applyRecheckScope(adapter, permissions, recheckScopeFor(uuidOfHolder(event.target.identifier)))
     }
 
     /** User holders carry their UUID string as the identifier name. */
