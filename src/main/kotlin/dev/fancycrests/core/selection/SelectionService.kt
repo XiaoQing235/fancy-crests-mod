@@ -97,6 +97,14 @@ sealed interface Eligibility {
  * All public methods must be called on the main thread; callbacks arrive on
  * the main thread as well.
  */
+/**
+ * Raw nickname storage bounds. Visible length stays capped by
+ * [NicknameConfig.maxLength]; the raw cap bounds the stored string when
+ * every visible character carries a formatting code pair.
+ */
+private const val RAW_NICKNAME_LENGTH_FACTOR = 4
+private const val RAW_NICKNAME_LENGTH_HEADROOM = 8
+
 class SelectionService(
     private val adapter: ServerAdapter,
     private val storage: SqliteStorage,
@@ -376,6 +384,24 @@ class SelectionService(
         val normalized = LegacyTextParser.strip(text).trim()
         val bypassReserved =
             permissions.check(uuid, Permissions.NICKNAME_BYPASS_RESERVED) == PermissionVerdict.ALLOW
+
+        // Raw-input gates: the stored and rendered value is the raw text, so
+        // forbidden characters and the storage bound must be checked before
+        // any code pair collapses — otherwise `Bob&\u202E` would pass every
+        // check below as the three visible characters "Bob".
+        if (containsForbiddenCharacters(text)) {
+            return SelectionResult.Rejected(
+                RejectionReason.NICKNAME_PATTERN,
+                "control characters, line breaks or bidirectional overrides are not allowed",
+            )
+        }
+        val rawLimit = config.nickname.maxLength * RAW_NICKNAME_LENGTH_FACTOR + RAW_NICKNAME_LENGTH_HEADROOM
+        if (text.length > rawLimit) {
+            return SelectionResult.Rejected(
+                RejectionReason.NICKNAME_TOO_LONG,
+                "exceeds $rawLimit raw characters including formatting codes (has ${text.length})",
+            )
+        }
 
         if (normalized.length < config.nickname.minLength) {
             return SelectionResult.Rejected(

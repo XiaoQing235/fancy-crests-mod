@@ -38,10 +38,12 @@ object TestFixtures {
         override fun profileName(uuid: UUID): String? =
             knownNames.entries.firstOrNull { it.value == uuid }?.key
 
-        override fun playerNameExact(name: String): UUID? = knownNames[name.lowercase()]
+        override fun playerNameExact(name: String): UUID? =
+            knownNames.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
         override fun operatorLevel(uuid: UUID): Int = operators[uuid] ?: 0
         override fun dimensionKey(uuid: UUID): String? = dimension
-        override fun knownPlayerNames(): Map<String, UUID> = knownNames
+        override fun knownPlayerNames(): Map<String, UUID> =
+            knownNames.mapKeys { (name, _) -> name.lowercase() }
         override fun sendSystemMessage(uuid: UUID, message: Component) {
             messages += uuid to message
         }
