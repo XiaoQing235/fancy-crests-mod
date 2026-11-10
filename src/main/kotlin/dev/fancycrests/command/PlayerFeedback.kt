@@ -7,6 +7,7 @@ import dev.fancycrests.core.event.TitleOperationType
 import java.util.concurrent.ConcurrentHashMap
 import net.minecraft.ChatFormatting
 import net.minecraft.network.chat.Component
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
@@ -42,6 +43,17 @@ object PlayerFeedback {
         if (attached) return
         attached = true
 
+        // Commands register during mod init, but the event bus only exists
+        // after CoreServices.start() on SERVER_STARTED; defer the wiring and
+        // rely on the integrator registering its start listener first.
+        if (core.isStarted) {
+            wire(core)
+        } else {
+            ServerLifecycleEvents.SERVER_STARTED.register { wire(core) }
+        }
+    }
+
+    private fun wire(core: CoreServices) {
         core.eventBus.addPreListener { event -> onPre(event) }
         core.eventBus.addPostListener { event -> onPost(event, core) }
     }

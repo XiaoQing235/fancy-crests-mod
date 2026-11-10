@@ -47,9 +47,9 @@ object FancyCrestsMod : ModInitializer {
         val services = CoreServices(loader.configDir, modVersion) { headChannel }
         core = services
 
-        // Command trees (/fancycrests, /names, /customnames) self-register.
-        FancyCrestsCommands.register(services)
-
+        // Register the start listener BEFORE the command layer so that
+        // CoreServices.start() runs before deferred attachers on the same
+        // SERVER_STARTED event (they need the initialized event bus).
         ServerLifecycleEvents.SERVER_STARTED.register { server ->
             services.start(MinecraftServerAdapter(server))
 
@@ -86,6 +86,10 @@ object FancyCrestsMod : ModInitializer {
         ServerPlayConnectionEvents.DISCONNECT.register { handler, _ ->
             services.onPlayerQuit(handler.player.uuid)
         }
+
+        // Command trees (/fancycrests, /names, /customnames) self-register;
+        // deferred attachments inside them run after start() above.
+        FancyCrestsCommands.register(services)
 
         LOGGER.info("Fancy Crests (Custom Names) initialized")
     }
