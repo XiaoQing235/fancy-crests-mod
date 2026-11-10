@@ -218,9 +218,14 @@ internal class LuckPermsEventBridge(
             subscribe(NodeRemoveEvent::class.java) { event -> onNodeMutate(event) }
             subscribe(NodeClearEvent::class.java) { event -> onNodeMutate(event) }
             // Context changes (world, server, ...) can flip context-conditional
-            // grants.
+            // grants. Subject-less/non-user subjects (server or global context
+            // switches) cannot be narrowed to a player, so conservatively
+            // revalidate everyone online — otherwise flipping a context-
+            // conditional permission back would only be picked up by the next
+            // unrelated recheck, making revocation latency unbounded and
+            // breaking the "immediate" declaration of LuckPermsMount.
             subscribe(ContextUpdateEvent::class.java) { event ->
-                uuidOfSubject(event.subject)?.let { onUserChange(it) }
+                applyRecheckScope(adapter, permissions, recheckScopeFor(uuidOfSubject(event.subject)))
             }
         } catch (t: Throwable) {
             close()
