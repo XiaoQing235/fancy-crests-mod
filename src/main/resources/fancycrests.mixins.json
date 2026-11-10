@@ -6,7 +6,9 @@
 	"mixins": [
 		"DisplayAccessor",
 		"TextDisplayAccessor",
-		"BillboardConstraintsAccessor"
+		"BillboardConstraintsAccessor",
+		"ClientboundSetPassengersPacketAccessor",
+		"ClientboundSetPlayerTeamPacketAccessor"
 	],
 	"injectors": {
 		"defaultRequire": 1
