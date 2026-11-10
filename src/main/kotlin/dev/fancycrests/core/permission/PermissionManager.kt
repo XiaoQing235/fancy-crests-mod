@@ -199,11 +199,4 @@ class PermissionManager(
         dirtyPlayers.remove(uuid)
         onPermissionChanged?.invoke(uuid)
     }
-
-    /** Drains all dirty marks (e.g. on a tick hook); returns the drained UUIDs. */
-    fun drainDirty(): List<UUID> {
-        val drained = dirtyPlayers.toList()
-        dirtyPlayers.clear()
-        return drained
-    }
 }
