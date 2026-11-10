@@ -163,29 +163,40 @@ class SqliteStorage(
         connection.createStatement().use { statement ->
             val version = queryUserVersion(statement)
             if (version == 0) {
-                // Fresh database (or pre-versioning): create the tables and stamp the version.
-                statement.executeUpdate(
-                    """
-                    CREATE TABLE IF NOT EXISTS player_state (
-                        uuid TEXT PRIMARY KEY,
-                        prefixes TEXT NOT NULL,
-                        suffixes TEXT NOT NULL,
-                        nickname TEXT NULL,
-                        revision INTEGER NOT NULL
+                val playerStateExists = tableExists(statement, "player_state")
+                val ownershipExists = tableExists(statement, "ownership")
+                if (playerStateExists || ownershipExists) {
+                    // Pre-versioning database. CREATE TABLE IF NOT EXISTS would
+                    // silently accept any incompatible layout and then stamp
+                    // it as this schema version; verify the layout first and
+                    // refuse (without touching any data) on mismatch.
+                    if (playerStateExists) verifyTableLayout(statement, "player_state", EXPECTED_PLAYER_STATE_COLUMNS)
+                    if (ownershipExists) verifyTableLayout(statement, "ownership", EXPECTED_OWNERSHIP_COLUMNS)
+                } else {
+                    // Fresh database: create the tables.
+                    statement.executeUpdate(
+                        """
+                        CREATE TABLE IF NOT EXISTS player_state (
+                            uuid TEXT PRIMARY KEY,
+                            prefixes TEXT NOT NULL,
+                            suffixes TEXT NOT NULL,
+                            nickname TEXT NULL,
+                            revision INTEGER NOT NULL
+                        )
+                        """.trimIndent(),
                     )
-                    """.trimIndent(),
-                )
-                statement.executeUpdate(
-                    """
-                    CREATE TABLE IF NOT EXISTS ownership (
-                        uuid TEXT NOT NULL,
-                        titleId TEXT NOT NULL,
-                        source TEXT NOT NULL,
-                        grantedAt INTEGER NOT NULL,
-                        PRIMARY KEY (uuid, titleId, source)
+                    statement.executeUpdate(
+                        """
+                        CREATE TABLE IF NOT EXISTS ownership (
+                            uuid TEXT NOT NULL,
+                            titleId TEXT NOT NULL,
+                            source TEXT NOT NULL,
+                            grantedAt INTEGER NOT NULL,
+                            PRIMARY KEY (uuid, titleId, source)
+                        )
+                        """.trimIndent(),
                     )
-                    """.trimIndent(),
-                )
+                }
                 statement.executeUpdate("PRAGMA user_version = $SCHEMA_VERSION")
             } else if (version != SCHEMA_VERSION) {
                 val file = databasePath?.toString() ?: ":memory:"
@@ -195,6 +206,60 @@ class SqliteStorage(
                         "Restore a matching database backup or remove the file to start fresh.",
                 )
             }
+        }
+    }
+
+    private fun tableExists(statement: java.sql.Statement, table: String): Boolean =
+        statement.executeQuery(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '$table'",
+        ).use { resultSet -> resultSet.next() }
+
+    /** (column name, declared type, NOT NULL, position in the primary key; 0 = not part). */
+    private data class ExpectedColumn(val name: String, val type: String, val notNull: Boolean, val pkPosition: Int)
+
+    private val EXPECTED_PLAYER_STATE_COLUMNS = listOf(
+        ExpectedColumn("uuid", "TEXT", notNull = false, pkPosition = 1),
+        ExpectedColumn("prefixes", "TEXT", notNull = true, pkPosition = 0),
+        ExpectedColumn("suffixes", "TEXT", notNull = true, pkPosition = 0),
+        ExpectedColumn("nickname", "TEXT", notNull = false, pkPosition = 0),
+        ExpectedColumn("revision", "INTEGER", notNull = true, pkPosition = 0),
+    )
+
+    private val EXPECTED_OWNERSHIP_COLUMNS = listOf(
+        ExpectedColumn("uuid", "TEXT", notNull = true, pkPosition = 1),
+        ExpectedColumn("titleId", "TEXT", notNull = true, pkPosition = 2),
+        ExpectedColumn("source", "TEXT", notNull = true, pkPosition = 3),
+        ExpectedColumn("grantedAt", "INTEGER", notNull = true, pkPosition = 0),
+    )
+
+    private fun verifyTableLayout(statement: java.sql.Statement, table: String, expected: List<ExpectedColumn>) {
+        data class ActualColumn(val name: String, val type: String, val notNull: Boolean, val pkPosition: Int)
+
+        val actual = statement.executeQuery("PRAGMA table_info($table)").use { resultSet ->
+            val columns = mutableListOf<ActualColumn>()
+            while (resultSet.next()) {
+                columns += ActualColumn(
+                    name = resultSet.getString("name"),
+                    type = resultSet.getString("type")?.uppercase() ?: "",
+                    notNull = resultSet.getInt("notnull") != 0,
+                    pkPosition = resultSet.getInt("pk"),
+                )
+            }
+            columns
+        }
+        val matches = actual.size == expected.size && actual.zip(expected).all { (found, want) ->
+            found.name == want.name && found.type == want.type &&
+                found.notNull == want.notNull && found.pkPosition == want.pkPosition
+        }
+        if (!matches) {
+            val found = actual.joinToString(", ") { "${it.name} ${it.type}" }
+            val wanted = expected.joinToString(", ") { "${it.name} ${it.type}" }
+            val file = databasePath?.toString() ?: ":memory:"
+            throw StorageSchemaException(
+                "existing table '$table' in $file does not match schema version $SCHEMA_VERSION " +
+                    "(found [$found], expected [$wanted]); refusing to load or modify the data. " +
+                    "Restore a matching database backup or remove the file to start fresh.",
+            )
         }
     }
 
