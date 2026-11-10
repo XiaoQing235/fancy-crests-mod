@@ -120,6 +120,15 @@ class TitleChangePreEvent internal constructor(internal val core: TitleChangeEve
     val current: PlayerTitleState get() = core.current
     /** Proposed state; has not been persisted yet. */
     val candidate: PlayerTitleState get() = core.candidate
+    /**
+     * Ownership grants after the operation, or null when the operation does
+     * not touch the ownership table (equip/unequip/nickname/recheck). For
+     * [ApiTitleOperation.GRANT] and [ApiTitleOperation.REVOKE] [candidate]
+     * keeps the pre-operation equipment state while this list describes the
+     * ownership change that is about to be written.
+     */
+    val candidateOwnership: List<TitleGrant>?
+        get() = core.candidateOwnership?.map { TitleGrant(it.titleId, it.source, it.grantedAt) }
     /** Human-readable reason tag, e.g. "command", "publicapi", "permission-changed". */
     val reason: String get() = core.reason
 

@@ -1,6 +1,7 @@
 package dev.fancycrests.core.event
 
 import dev.fancycrests.api.PlayerTitleState
+import dev.fancycrests.core.storage.OwnershipRecord
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import java.util.ArrayDeque
@@ -41,6 +42,14 @@ class TitleChangeEventPre(
     val candidate: PlayerTitleState,
     /** Human-readable reason tag, e.g. "command", "eligibility-lost". */
     val reason: String,
+    /**
+     * Ownership grants the operation would produce, or null when the
+     * operation does not touch the ownership table (equip/unequip/nickname/
+     * recheck). GRANT and REVOKE carry the complete post-operation list so a
+     * listener can cancel an admin or API grant before a single row is
+     * written; [candidate] stays the pre-operation state for those types.
+     */
+    val candidateOwnership: List<OwnershipRecord>? = null,
 ) {
     @Volatile
     var cancelled: Boolean = false

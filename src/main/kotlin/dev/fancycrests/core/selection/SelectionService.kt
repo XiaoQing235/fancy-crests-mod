@@ -21,6 +21,7 @@ import dev.fancycrests.core.storage.SqliteStorage
 import dev.fancycrests.core.storage.StateSaveResult
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import net.minecraft.network.chat.Component
 
 /** Target of an unequip operation. */
 sealed interface UnequipTarget {
@@ -35,6 +36,9 @@ enum class RejectionReason {
     ALREADY_EQUIPPED,
     LIMIT_REACHED,
     NOT_ELIGIBLE,
+
+    /** The caller lacks the equip/unequip node (checked in the service, not the UI). */
+    MISSING_PERMISSION,
     NICKNAME_DISABLED,
     NICKNAME_TOO_SHORT,
     NICKNAME_TOO_LONG,
@@ -125,6 +129,26 @@ class SelectionService(
     fun ownershipOf(uuid: UUID): List<OwnershipRecord> =
         ownership[uuid]?.toList() ?: emptyList()
 
+    /**
+     * Inserts [record] and replaces any existing grant with the same
+     * (titleId, source) key. The database enforces that key with a primary
+     * key, so the in-memory set must apply the same rule; otherwise repeated
+     * grants stack up until a restart, inflating ownership counts.
+     */
+    private fun recordOwnership(uuid: UUID, record: OwnershipRecord) {
+        ownership.merge(uuid, setOf(record)) { old, new ->
+            val kept = old.filterNot { it.titleId == record.titleId && it.source == record.source }
+            (kept + new).toSet()
+        }
+    }
+
+    /** Removes the grant with the given (titleId, source) key, if present. */
+    private fun dropOwnership(uuid: UUID, titleId: TitleId, source: String) {
+        ownership.merge(uuid, emptySet()) { old, _ ->
+            old.filterNot { it.titleId == titleId && it.source == source }.toSet()
+        }
+    }
+
     fun hasOwnership(uuid: UUID, titleId: TitleId, source: String? = null): Boolean =
         ownership[uuid]?.any { it.titleId == titleId && (source == null || it.source == source) } == true
 
@@ -142,6 +166,14 @@ class SelectionService(
         return Eligibility.NotEligible
     }
 
+    /**
+     * Equip/unequip gate. Checked here (not only in the command layer) so the
+     * GUI and the public API obey the same rule: a player who was explicitly
+     * denied `fancycrests.equip` cannot change equipment through any path.
+     */
+    private fun canModifyEquipment(uuid: UUID): Boolean =
+        permissions.check(uuid, Permissions.EQUIP) == PermissionVerdict.ALLOW
+
     // ----------------------------------------------------------------------
     // Equip / unequip
     // ----------------------------------------------------------------------
@@ -149,6 +181,16 @@ class SelectionService(
     /** Appends [titleId] to the end of its slot list after full validation. */
     fun equip(uuid: UUID, titleId: TitleId, reason: String, callback: (SelectionResult) -> Unit) {
         submit(uuid) { done ->
+            if (!canModifyEquipment(uuid)) {
+                callback(
+                    SelectionResult.Rejected(
+                        RejectionReason.MISSING_PERMISSION,
+                        "you lack '${Permissions.EQUIP}'",
+                    ),
+                )
+                done()
+                return@submit
+            }
             val current = stateOf(uuid)
             val definition = catalog.get(titleId)
             if (definition == null) {
@@ -212,6 +254,16 @@ class SelectionService(
     /** Removes one or all titles of [slot], preserving the order of the rest. */
     fun unequip(uuid: UUID, slot: TitleSlot, target: UnequipTarget, reason: String, callback: (SelectionResult) -> Unit) {
         submit(uuid) { done ->
+            if (!canModifyEquipment(uuid)) {
+                callback(
+                    SelectionResult.Rejected(
+                        RejectionReason.MISSING_PERMISSION,
+                        "you lack '${Permissions.EQUIP}'",
+                    ),
+                )
+                done()
+                return@submit
+            }
             val current = stateOf(uuid)
             val removed: List<TitleId> = when (target) {
                 is UnequipTarget.One -> {
@@ -392,10 +444,27 @@ class SelectionService(
             }
             val operationId = eventBus.newOperationId()
             val record = OwnershipRecord(uuid, titleId, source, System.currentTimeMillis())
+            val current = stateOf(uuid)
+            val candidateOwnership = ownershipOf(uuid)
+                .filterNot { it.titleId == titleId && it.source == source } + record
+            val pre = TitleChangeEventPre(
+                uuid = uuid,
+                operationId = operationId,
+                type = TitleOperationType.GRANT,
+                current = current,
+                candidate = current,
+                reason = reason,
+                candidateOwnership = candidateOwnership.sortedBy { it.grantedAt },
+            )
+            if (eventBus.firePre(pre)) {
+                callback(SelectionResult.Cancelled)
+                done()
+                return@submit
+            }
             storage.enqueueUpsertOwnership(record) { result ->
                 when (result) {
                     is OwnershipWriteResult.Written -> {
-                        ownership.merge(uuid, setOf(record)) { old, new -> old + new }
+                        recordOwnership(uuid, record)
                         publisher.publish(stateOf(uuid))
                         eventBus.firePost(
                             TitleChangeEventPost(
@@ -421,12 +490,27 @@ class SelectionService(
     fun revoke(uuid: UUID, titleId: TitleId, source: String, reason: String, callback: (SelectionResult) -> Unit) {
         submit(uuid) { done ->
             val operationId = eventBus.newOperationId()
+            val current = stateOf(uuid)
+            val candidateOwnership = ownershipOf(uuid)
+                .filterNot { it.titleId == titleId && it.source == source }
+            val pre = TitleChangeEventPre(
+                uuid = uuid,
+                operationId = operationId,
+                type = TitleOperationType.REVOKE,
+                current = current,
+                candidate = current,
+                reason = reason,
+                candidateOwnership = candidateOwnership,
+            )
+            if (eventBus.firePre(pre)) {
+                callback(SelectionResult.Cancelled)
+                done()
+                return@submit
+            }
             storage.enqueueDeleteOwnership(uuid, titleId, source) { result ->
                 when (result) {
                     is OwnershipWriteResult.Written -> {
-                        ownership.merge(uuid, emptySet()) { old, _ ->
-                            old.filterNot { it.titleId == titleId && it.source == source }.toSet()
-                        }
+                        dropOwnership(uuid, titleId, source)
                         publisher.publish(stateOf(uuid))
                         eventBus.firePost(
                             TitleChangeEventPost(
@@ -463,18 +547,39 @@ class SelectionService(
     fun revalidatePlayer(uuid: UUID, reason: String, callback: (SelectionResult) -> Unit) {
         submit(uuid) { done ->
             val current = stateOf(uuid)
-            val invalidPrefixes = current.prefixes.filter { !isEquippableNow(uuid, it, TitleSlot.PREFIX) }
-            val invalidSuffixes = current.suffixes.filter { !isEquippableNow(uuid, it, TitleSlot.SUFFIX) }
-            if (invalidPrefixes.isEmpty() && invalidSuffixes.isEmpty()) {
+            val config = configProvider()
+            // Two independent filters, in one pass so the persisted order is
+            // preserved: (1) the reference must still resolve and be eligible,
+            // (2) the slot must not exceed the current equip limit. Without
+            // (2) lowering a limit would never take effect on existing players.
+            val eligiblePrefixes = current.prefixes.filter { isEquippableNow(uuid, it, TitleSlot.PREFIX) }
+            val eligibleSuffixes = current.suffixes.filter { isEquippableNow(uuid, it, TitleSlot.SUFFIX) }
+            val keptPrefixes = eligiblePrefixes.take(config.equipment.maxPrefixes)
+            val keptSuffixes = eligibleSuffixes.take(config.equipment.maxSuffixes)
+            if (keptPrefixes == current.prefixes && keptSuffixes == current.suffixes) {
                 publisher.publish(current)
                 callback(SelectionResult.Success("recheck", current.revision, current.revision))
                 done()
                 return@submit
             }
-            val candidate = current.copy(
-                prefixes = current.prefixes - invalidPrefixes.toSet(),
-                suffixes = current.suffixes - invalidSuffixes.toSet(),
-            )
+            val trimmedByLimit = (eligiblePrefixes.size - keptPrefixes.size) +
+                (eligibleSuffixes.size - keptSuffixes.size)
+            if (trimmedByLimit > 0) {
+                // Only the limit path is worth telling the player about;
+                // ineligible titles (renamed/removed/permission lost) are
+                // already explained by the catalog and permission feedback.
+                adapter.sendSystemMessage(
+                    uuid,
+                    Component.literal(
+                        "Equip limit is now prefix=" + config.equipment.maxPrefixes +
+                            " suffix=" + config.equipment.maxSuffixes +
+                            ": kept " + keptPrefixes.size + " prefix(es) and " + keptSuffixes.size +
+                            " suffix(es) in equip order; " + trimmedByLimit +
+                            " title(s) were unequipped.",
+                    ).withStyle(net.minecraft.ChatFormatting.YELLOW),
+                )
+            }
+            val candidate = current.copy(prefixes = keptPrefixes, suffixes = keptSuffixes)
             commitState(
                 uuid = uuid,
                 type = TitleOperationType.RECHECK,
