@@ -584,6 +584,15 @@ class SelectionService(
      * Persisted selections are never treated as permanent authorization.
      */
     fun revalidatePlayer(uuid: UUID, reason: String, callback: (SelectionResult) -> Unit) {
+        // A backend that cannot answer yet (external provider still loading
+        // the user) must not turn interim UNDEFINED verdicts into a persisted
+        // unequip: defer entirely and let the backend's own readiness event
+        // (load completion) drive the recheck, by which time isReady is true.
+        if (!permissions.isReady(uuid)) {
+            val revision = stateOf(uuid).revision
+            callback(SelectionResult.Success("deferred", revision, revision))
+            return
+        }
         submit(uuid) { done ->
             val current = stateOf(uuid)
             val config = configProvider()

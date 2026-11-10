@@ -25,6 +25,15 @@ interface PermissionBackend {
      * has no explicit entry. Never applies default policies.
      */
     fun explicitVerdict(uuid: UUID, node: String): PermissionVerdict
+
+    /**
+     * False while this backend cannot answer reliably for [uuid] yet — e.g.
+     * an external provider still loading that user's data. Callers must
+     * DEFER revalidation instead of treating the interim UNDEFINED verdicts
+     * as a deny: unequipping and persisting titles on a "not loaded yet"
+     * answer would never be rolled back. Defaults to always ready.
+     */
+    fun isReady(uuid: UUID): Boolean = true
 }
 
 /** How a node is decided when no backend gave an explicit verdict. */
@@ -161,6 +170,14 @@ class PermissionManager(
     /** Backend chain for diagnostics, in consultation order. */
     fun backendNames(): List<String> =
         (backendChain + dynamicBackends).map { it.name }
+
+    /**
+     * True when every backend can answer reliably for [uuid] right now.
+     * Revalidation must be deferred (not run) while this is false — see
+     * [PermissionBackend.isReady].
+     */
+    fun isReady(uuid: UUID): Boolean =
+        (backendChain + dynamicBackends).all { it.isReady(uuid) }
 
     override fun check(playerUuid: UUID, node: String): PermissionVerdict {
         // 1. explicit verdicts. A deny from ANY backend wins over an allow from
