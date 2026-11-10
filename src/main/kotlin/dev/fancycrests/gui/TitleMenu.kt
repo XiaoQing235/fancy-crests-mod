@@ -198,8 +198,12 @@ class TitleMenu private constructor(
                         )
                 }
             } finally {
-                renderPage()
+                // Release the debounce flag BEFORE re-rendering: renderPage
+                // touches live server state and can throw, and a stuck flag
+                // would swallow every future click (same ordering as the
+                // staleness path above).
                 clickInFlight.set(false)
+                renderPage()
             }
         }
         if (alreadyEquipped) {
