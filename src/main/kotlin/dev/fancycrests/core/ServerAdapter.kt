@@ -52,6 +52,18 @@ interface ServerAdapter {
      * All player names currently known to the server, mapped from the
      * lowercase name to the UUID. Used by nickname collision checks ("must not
      * occupy another known player's real name").
+     *
+     * 26.2 limitation (verified with javap against minecraft-merged.jar):
+     * this covers *online* players only. The vanilla name cache is reachable
+     * (MinecraftServer.services().nameToIdCache(): UserNameToIdResolver), but
+     * it has no public enumeration, and its only name-keyed read,
+     * get(String), is neither read-only nor cheap: it removes expired entries
+     * and, on a miss, performs a *blocking* Mojang API lookup — with offline
+     * profile synthesis enabled it would even report every candidate
+     * nickname as occupied. get(UUID) is local but UUID-keyed, which cannot
+     * answer "does anyone own this name". A nickname can therefore be set to
+     * the real name of a player who is offline at that moment. No reflection
+     * is used to work around this.
      */
     fun knownPlayerNames(): Map<String, UUID>
 
@@ -113,6 +125,11 @@ class MinecraftServerAdapter(private val server: net.minecraft.server.MinecraftS
     }
 
     override fun knownPlayerNames(): Map<String, UUID> {
+        // Online players only: the vanilla user cache
+        // (MinecraftServer.services().nameToIdCache()) cannot supplement this
+        // map — see the interface KDoc for the 26.2 evidence (no public
+        // enumeration; get(String) mutates the cache and blocks on the Mojang
+        // API for misses, synthesizing offline profiles on offline servers).
         val names = HashMap<String, UUID>()
         for (player in server.playerList.players) {
             val profile = player.gameProfile
