@@ -22,6 +22,8 @@ import dev.fancycrests.core.storage.StateSaveResult
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import net.minecraft.network.chat.Component
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 
 /** Target of an unequip operation. */
 sealed interface UnequipTarget {
@@ -104,6 +106,8 @@ sealed interface Eligibility {
  */
 private const val RAW_NICKNAME_LENGTH_FACTOR = 4
 private const val RAW_NICKNAME_LENGTH_HEADROOM = 8
+
+private val LOGGER: Logger = LoggerFactory.getLogger("FancyCrests/Selection")
 
 class SelectionService(
     private val adapter: ServerAdapter,
@@ -488,26 +492,31 @@ class SelectionService(
                 return@submit
             }
             storage.enqueueUpsertOwnership(record) { result ->
-                when (result) {
-                    is OwnershipWriteResult.Written -> {
-                        recordOwnership(uuid, record)
-                        publisher.publish(stateOf(uuid))
-                        eventBus.firePost(
-                            TitleChangeEventPost(
-                                uuid = uuid,
-                                operationId = operationId,
-                                type = TitleOperationType.GRANT,
-                                oldRevision = stateOf(uuid).revision,
-                                newRevision = stateOf(uuid).revision,
-                                reason = reason,
-                            ),
-                        )
-                        callback(SelectionResult.Success(operationId.value, stateOf(uuid).revision, stateOf(uuid).revision))
+                try {
+                    when (result) {
+                        is OwnershipWriteResult.Written -> {
+                            recordOwnership(uuid, record)
+                            publisher.publish(stateOf(uuid))
+                            eventBus.firePost(
+                                TitleChangeEventPost(
+                                    uuid = uuid,
+                                    operationId = operationId,
+                                    type = TitleOperationType.GRANT,
+                                    oldRevision = stateOf(uuid).revision,
+                                    newRevision = stateOf(uuid).revision,
+                                    reason = reason,
+                                ),
+                            )
+                            callback(SelectionResult.Success(operationId.value, stateOf(uuid).revision, stateOf(uuid).revision))
+                        }
+                        is OwnershipWriteResult.Error ->
+                            callback(SelectionResult.StorageFailure(result.exception.message ?: "ownership write failed"))
                     }
-                    is OwnershipWriteResult.Error ->
-                        callback(SelectionResult.StorageFailure(result.exception.message ?: "ownership write failed"))
+                } finally {
+                    // The completion signal must survive a throwing publish or
+                    // user callback, or the player's queue slot leaks forever.
+                    done()
                 }
-                done()
             }
         }
     }
@@ -534,28 +543,32 @@ class SelectionService(
                 return@submit
             }
             storage.enqueueDeleteOwnership(uuid, titleId, source) { result ->
-                when (result) {
-                    is OwnershipWriteResult.Written -> {
-                        dropOwnership(uuid, titleId, source)
-                        publisher.publish(stateOf(uuid))
-                        eventBus.firePost(
-                            TitleChangeEventPost(
-                                uuid = uuid,
-                                operationId = operationId,
-                                type = TitleOperationType.REVOKE,
-                                oldRevision = stateOf(uuid).revision,
-                                newRevision = stateOf(uuid).revision,
-                                reason = reason,
-                            ),
-                        )
-                        // Removing ownership may invalidate an equipped title.
-                        revalidatePlayer(uuid, "ownership-revoked") {}
-                        callback(SelectionResult.Success(operationId.value, stateOf(uuid).revision, stateOf(uuid).revision))
+                try {
+                    when (result) {
+                        is OwnershipWriteResult.Written -> {
+                            dropOwnership(uuid, titleId, source)
+                            publisher.publish(stateOf(uuid))
+                            eventBus.firePost(
+                                TitleChangeEventPost(
+                                    uuid = uuid,
+                                    operationId = operationId,
+                                    type = TitleOperationType.REVOKE,
+                                    oldRevision = stateOf(uuid).revision,
+                                    newRevision = stateOf(uuid).revision,
+                                    reason = reason,
+                                ),
+                            )
+                            // Removing ownership may invalidate an equipped title.
+                            revalidatePlayer(uuid, "ownership-revoked") {}
+                            callback(SelectionResult.Success(operationId.value, stateOf(uuid).revision, stateOf(uuid).revision))
+                        }
+                        is OwnershipWriteResult.Error ->
+                            callback(SelectionResult.StorageFailure(result.exception.message ?: "ownership delete failed"))
                     }
-                    is OwnershipWriteResult.Error ->
-                        callback(SelectionResult.StorageFailure(result.exception.message ?: "ownership delete failed"))
+                } finally {
+                    // As in grant: a throwing callback must not wedge the queue.
+                    done()
                 }
-                done()
             }
         }
     }
@@ -648,8 +661,11 @@ class SelectionService(
 
     /**
      * Shared commit pipeline: pre event on the candidate, optimistic write,
-     * main-thread publish, post event. [done] must be invoked exactly once on
-     * every path (async completions included).
+     * main-thread publish, post event. [done] is invoked exactly once on
+     * every path (async completions included): the storage callback wraps
+     * its body in try/finally and [submit] guards the whole body against
+     * crashes, so a throwing listener or user callback can never wedge the
+     * player's operation queue.
      */
     private fun commitState(
         uuid: UUID,
@@ -669,32 +685,37 @@ class SelectionService(
         }
 
         storage.enqueueSaveState(candidate, current.revision) { result ->
-            when (result) {
-                is StateSaveResult.Saved -> {
-                    val committed = candidate.copy(revision = result.newRevision)
-                    // Guard against a stale completion racing a newer state:
-                    // per-player serialization means this can only be the
-                    // newest op, but an online count check keeps it honest.
-                    states[uuid] = committed
-                    publisher.publish(committed)
-                    eventBus.firePost(
-                        TitleChangeEventPost(
-                            uuid = uuid,
-                            operationId = operationId,
-                            type = type,
-                            oldRevision = current.revision,
-                            newRevision = result.newRevision,
-                            reason = reason,
-                        ),
-                    )
-                    callback(SelectionResult.Success(operationId.value, current.revision, result.newRevision))
+            try {
+                when (result) {
+                    is StateSaveResult.Saved -> {
+                        val committed = candidate.copy(revision = result.newRevision)
+                        // Guard against a stale completion racing a newer state:
+                        // per-player serialization means this can only be the
+                        // newest op, but an online count check keeps it honest.
+                        states[uuid] = committed
+                        publisher.publish(committed)
+                        eventBus.firePost(
+                            TitleChangeEventPost(
+                                uuid = uuid,
+                                operationId = operationId,
+                                type = type,
+                                oldRevision = current.revision,
+                                newRevision = result.newRevision,
+                                reason = reason,
+                            ),
+                        )
+                        callback(SelectionResult.Success(operationId.value, current.revision, result.newRevision))
+                    }
+                    StateSaveResult.RevisionConflict ->
+                        callback(SelectionResult.Conflict)
+                    is StateSaveResult.Error ->
+                        callback(SelectionResult.StorageFailure(result.exception.message ?: "state write failed"))
                 }
-                StateSaveResult.RevisionConflict ->
-                    callback(SelectionResult.Conflict)
-                is StateSaveResult.Error ->
-                    callback(SelectionResult.StorageFailure(result.exception.message ?: "state write failed"))
+            } finally {
+                // The completion signal must survive a throwing publish or
+                // user callback, or the player's queue slot leaks forever.
+                done()
             }
-            done()
         }
     }
 
@@ -714,7 +735,35 @@ class SelectionService(
             }
         }
         if (runNow) {
-            body(completionFor(uuid))
+            runGuarded(uuid, body, completionFor(uuid))
+        }
+    }
+
+    /**
+     * Runs one operation body so the completion signal can never be lost. Any
+     * crash (validation, permission backend, event listener, user callback)
+     * releases the player's queue slot instead of leaving [inFlight] set
+     * forever, which would deadlock every future operation of that player.
+     * The wrapped [done] is idempotent, so a body that throws after already
+     * scheduling its async completion cannot double-fire it.
+     */
+    private fun runGuarded(uuid: UUID, body: (() -> Unit) -> Unit, done: () -> Unit) {
+        var signalled = false
+        val once: () -> Unit = {
+            if (!signalled) {
+                signalled = true
+                done()
+            }
+        }
+        try {
+            body(once)
+        } catch (t: Throwable) {
+            LOGGER.error(
+                "Selection operation for player {} crashed; releasing the queue slot",
+                uuid,
+                t,
+            )
+            once()
         }
     }
 
@@ -728,7 +777,7 @@ class SelectionService(
             }
             if (next != null) {
                 // Keep running the queue inline; we are on the main thread.
-                next(completionFor(uuid))
+                runGuarded(uuid, next, completionFor(uuid))
             }
         } else {
             inFlight.remove(uuid)
