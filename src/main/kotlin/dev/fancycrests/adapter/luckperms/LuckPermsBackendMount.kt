@@ -99,6 +99,14 @@ internal class LuckPermsPermissionBackend(
 
     override val name: String = "luckperms"
 
+    /**
+     * Ready only once LuckPerms has the user's data loaded. Core defers
+     * whole-player revalidation while this is false, so the not-loaded
+     * window can no longer unequip and persist permission-gated titles;
+     * the lazy load below flips readiness and drives the real recheck.
+     */
+    override fun isReady(uuid: UUID): Boolean = luckPerms.userManager.getUser(uuid) != null
+
     override fun explicitVerdict(uuid: UUID, node: String): dev.fancycrests.api.PermissionVerdict {
         val user = luckPerms.userManager.getUser(uuid)
         if (user == null) {
