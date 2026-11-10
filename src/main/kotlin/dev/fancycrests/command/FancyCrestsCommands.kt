@@ -59,7 +59,7 @@ object FancyCrestsCommands {
                     .then(
                         Commands.literal(literal)
                             .then(
-                                Commands.argument("titleId", StringArgumentType.word())
+                                Commands.argument("titleId", StringArgumentType.greedyString())
                                     .suggests { _, builder ->
                                         CommandSupport.suggestValues(
                                             core.catalogService.idsForSlot(slot).map { it.value },
@@ -81,7 +81,7 @@ object FancyCrestsCommands {
                                 },
                             )
                             .then(
-                                Commands.argument("titleId", StringArgumentType.word())
+                                Commands.argument("titleId", StringArgumentType.greedyString())
                                     .suggests { ctx, builder ->
                                         val player = ctx.source.player
                                         val equipped = if (player == null) {
@@ -122,7 +122,7 @@ object FancyCrestsCommands {
                             builder.buildFuture()
                         }
                         .then(
-                            Commands.argument("titleId", StringArgumentType.word())
+                            Commands.argument("titleId", StringArgumentType.greedyString())
                                 .suggests { _, builder ->
                                     CommandSupport.suggestValues(
                                         core.catalogService.all().map { it.id.value },
@@ -144,7 +144,7 @@ object FancyCrestsCommands {
                             builder.buildFuture()
                         }
                         .then(
-                            Commands.argument("titleId", StringArgumentType.word())
+                            Commands.argument("titleId", StringArgumentType.greedyString())
                                 .suggests { _, builder ->
                                     CommandSupport.suggestValues(
                                         core.catalogService.all().map { it.id.value },
@@ -424,6 +424,7 @@ object FancyCrestsCommands {
             RejectionReason.ALREADY_EQUIPPED -> "Already equipped${detail}"
             RejectionReason.LIMIT_REACHED -> "Equip limit reached${detail}"
             RejectionReason.NOT_ELIGIBLE -> "Not eligible${detail}"
+            RejectionReason.MISSING_PERMISSION -> "Missing permission${detail}"
             RejectionReason.NICKNAME_DISABLED -> "Nicknames are disabled${detail}"
             RejectionReason.NICKNAME_TOO_SHORT -> "Nickname too short${detail}"
             RejectionReason.NICKNAME_TOO_LONG -> "Nickname too long${detail}"
