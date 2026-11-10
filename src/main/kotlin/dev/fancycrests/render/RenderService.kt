@@ -187,31 +187,47 @@ internal class RenderService(initialSettings: RenderSettings) {
         // 1) Labels and mounts: real-passengers-only list first (only when
         //    the observer is still connected and the target entity still
         //    exists server-side), then remove the virtual entities.
+        //    Every send is isolated per connection: one dead/racy listener
+        //    must not abort the teardown for the remaining connections
+        //    (a stray exception here would leave their virtual teams live
+        //    and their name tags suppressed until relogin).
         for ((listener, state) in connections) {
             synchronized(state.lock) {
                 for ((_, obs) in state.targets) {
-                    val realPassengers = server?.playerList?.getPlayer(obs.targetUuid)?.passengers?.map { it.id }
-                        ?: obs.lastRealPassengers
-                    val targetExists = server?.playerList?.getPlayer(obs.targetUuid) != null
-                    if (targetExists) {
-                        sendPacket(listener, PassengerPackets.create(obs.targetEntityId, realPassengers.toIntArray()))
+                    try {
+                        val realPassengers = server?.playerList?.getPlayer(obs.targetUuid)?.passengers?.map { it.id }
+                            ?: obs.lastRealPassengers
+                        val targetExists = server?.playerList?.getPlayer(obs.targetUuid) != null
+                        if (targetExists) {
+                            sendPacket(listener, PassengerPackets.create(obs.targetEntityId, realPassengers.toIntArray()))
+                        }
+                        sendPacket(listener, ClientboundRemoveEntitiesPacket(*obs.liveLabelIds().toIntArray()))
+                    } catch (t: Exception) {
+                        RenderDiagnostics.recordError("stop label removal", t)
                     }
-                    sendPacket(listener, ClientboundRemoveEntitiesPacket(*obs.liveLabelIds().toIntArray()))
                 }
                 state.targets.clear()
 
                 // 2) Virtual team deletion for every known player.
                 val overlays = state.overlays.values.toList()
                 for (overlay in overlays) {
-                    sendPacket(listener, TeamPackets.removeVirtual(overlay.virtualTeamName))
+                    try {
+                        sendPacket(listener, TeamPackets.removeVirtual(overlay.virtualTeamName))
+                    } catch (t: Exception) {
+                        RenderDiagnostics.recordError("stop virtual team removal", t)
+                    }
                 }
 
                 // 3) Restore membership to the latest effective source team
                 //    (missing source -> stay teamless).
                 for (overlay in overlays) {
-                    val effective = state.ledger.teamOf(overlay.currentName)
-                    if (effective != null) {
-                        sendPacket(listener, TeamPackets.restoreToSource(effective.first, overlay.currentName))
+                    try {
+                        val effective = state.ledger.teamOf(overlay.currentName)
+                        if (effective != null) {
+                            sendPacket(listener, TeamPackets.restoreToSource(effective.first, overlay.currentName))
+                        }
+                    } catch (t: Exception) {
+                        RenderDiagnostics.recordError("stop source restore", t)
                     }
                 }
 
