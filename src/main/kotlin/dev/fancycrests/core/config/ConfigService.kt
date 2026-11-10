@@ -482,8 +482,8 @@ class ConfigService(
 
         val equipmentObj = root.optObject("equipment", "equipment", errors)
         val equipment = EquipmentConfig(
-            maxPrefixes = equipmentObj.int("maxPrefixes", 3, "equipment.maxPrefixes", errors),
-            maxSuffixes = equipmentObj.int("maxSuffixes", 3, "equipment.maxSuffixes", errors),
+            maxPrefixes = equipmentObj.strictInt("maxPrefixes", 3, "equipment.maxPrefixes", errors),
+            maxSuffixes = equipmentObj.strictInt("maxSuffixes", 3, "equipment.maxSuffixes", errors),
         )
 
         val nicknameObj = root.optObject("nickname", "nickname", errors)
@@ -495,8 +495,8 @@ class ConfigService(
             Pattern.compile("[A-Za-z0-9_]+")
         }
         val nickname = NicknameConfig(
-            maxLength = nicknameObj.int("maxLength", 16, "nickname.maxLength", errors),
-            minLength = nicknameObj.int("minLength", 3, "nickname.minLength", errors),
+            maxLength = nicknameObj.strictInt("maxLength", 16, "nickname.maxLength", errors),
+            minLength = nicknameObj.strictInt("minLength", 3, "nickname.minLength", errors),
             pattern = pattern,
             reservedNames = nicknameObj.stringList("reservedNames", "nickname.reservedNames", errors),
             allowSet = nicknameObj.boolean("allowSet", true, "nickname.allowSet", errors),
@@ -572,7 +572,7 @@ class ConfigService(
             )
             rules += SecondLineRuleConfig(
                 id = obj.string("id", "", "$path.id", errors) ?: "",
-                priority = obj.int("priority", 0, "$path.priority", errors),
+                priority = obj.strictInt("priority", 0, "$path.priority", errors),
                 condition = condition,
                 template = obj.string("template", "", "$path.template", errors) ?: "",
                 refreshTicks = obj.strictInt(
@@ -629,7 +629,7 @@ class ConfigService(
                     permission = obj.string("permission", null, "$path.permission", errors)?.takeIf { it.isNotBlank() },
                     category = obj.string("category", null, "$path.category", errors)?.takeIf { it.isNotBlank() },
                     iconItem = obj.string("iconItem", null, "$path.iconItem", errors)?.takeIf { it.isNotBlank() },
-                    sortOrder = obj.int("sortOrder", 0, "$path.sortOrder", errors),
+                    sortOrder = obj.strictInt("sortOrder", 0, "$path.sortOrder", errors),
                 )
             }
         }
@@ -662,42 +662,43 @@ class ConfigService(
         return default
     }
 
-    private fun JsonObject.int(member: String, default: Int, path: String, errors: MutableList<ConfigError>): Int {
-        val element = get(member) ?: return default
-        if (element is JsonPrimitive && element.isNumber) return element.asInt
-        errors += ConfigError(path, "must be an integer")
-        return default
-    }
-
     /**
-     * Strict integer parse used for range-checked fields: rejects non-numbers,
-     * fractional numbers and values outside [min]..[max], always reporting the
-     * exact JSON path (never silently rewriting user input).
+     * Strict integer parse: rejects non-numbers, fractional numbers (never a
+     * silent truncation like JsonPrimitive.asInt) and — when given — values
+     * outside [min]..[max], always reporting the exact JSON path. Legal
+     * integers (including integral floats such as `3.0`) parse unchanged.
      */
     private fun JsonObject.strictInt(
         member: String,
         default: Int,
         path: String,
         errors: MutableList<ConfigError>,
-        min: Int,
-        max: Int,
+        min: Int? = null,
+        max: Int? = null,
     ): Int {
         val element = get(member) ?: return default
         val primitive = element as? JsonPrimitive
         if (primitive == null || !primitive.isNumber) {
-            errors += ConfigError(path, "must be an integer between $min and $max")
+            errors += ConfigError(path, "must be an integer${rangeSuffix(min, max)}")
             return default
         }
         val value = primitive.asDouble
         val isIntegral = !value.isNaN() && kotlin.math.floor(value) == value
-        if (!isIntegral || value < min || value > max) {
+        if (!isIntegral || (min != null && value < min) || (max != null && value > max)) {
             errors += ConfigError(
                 path,
-                "must be an integer between $min and $max inclusive (was ${primitive.asString})",
+                "must be an integer${rangeSuffix(min, max)} (was ${primitive.asString})",
             )
             return default
         }
         return value.toInt()
+    }
+
+    private fun rangeSuffix(min: Int?, max: Int?): String = when {
+        min != null && max != null -> " between $min and $max inclusive"
+        min != null -> " >= $min"
+        max != null -> " <= $max"
+        else -> ""
     }
 
     private fun JsonObject.double(member: String, default: Double, path: String, errors: MutableList<ConfigError>): Double {
