@@ -307,6 +307,24 @@ internal class RenderService(initialSettings: RenderSettings) {
         }
     }
 
+    /**
+     * Called by [RenderPackets.sendBypassing] when a produced replacement
+     * list could not be (fully) delivered. Team creates inside that list
+     * were already marked sent while the transformer built it; without this
+     * hook the connection would forever believe the virtual teams exist
+     * client-side (member ops dropped, name tags unsuppressed) with no path
+     * to re-create them. Clearing teamSent makes the next property update
+     * take the create branch again - idempotent for teams that did arrive.
+     */
+    internal fun onOutboundResendFailed(listener: ServerGamePacketListenerImpl) {
+        val state = connections[listener] ?: return
+        synchronized(state.lock) {
+            for (overlay in state.overlays.values) {
+                overlay.teamSent = false
+            }
+        }
+    }
+
     private fun serverOf(listener: ServerGamePacketListenerImpl): MinecraftServer? =
         listener.player.level().server
 
@@ -342,7 +360,18 @@ internal class RenderService(initialSettings: RenderSettings) {
             synchronized(state.lock) {
                 val init = state.pendingInit
                 state.pendingInit = null
-                if (!init.isNullOrEmpty()) RenderPackets.sendAll(listener, init)
+                if (!init.isNullOrEmpty()) {
+                    try {
+                        RenderPackets.sendAll(listener, init)
+                    } catch (t: Exception) {
+                        // The init list carries the virtual team creates and
+                        // was marked teamSent before the send; on failure let
+                        // the next property update lazily re-create them
+                        // instead of trusting a create the client never got.
+                        RenderDiagnostics.recordError("connection init flush", t)
+                        for (overlay in state.overlays.values) overlay.teamSent = false
+                    }
+                }
             }
         }
         return state
@@ -679,6 +708,27 @@ internal class RenderService(initialSettings: RenderSettings) {
             RenderDiagnostics.recordError("label spawn", t)
             state.targets.remove(target.uuid)
             adjustRelation(target, -1)
+            // The failure may have struck mid-list: some AddEntity packets
+            // can already be on the wire while the metadata/mount never
+            // arrived, which would leave raw text_display entities (default
+            // 200px line width, empty text) riding the player. Best-effort
+            // removal of every id this spawn could have delivered makes the
+            // failure self-healing; a follow-up tracking start re-spawns
+            // cleanly through the full path.
+            try {
+                sendPacket(
+                    listener,
+                    ClientboundRemoveEntitiesPacket(
+                        *buildList {
+                            add(target.labelIds.foregroundId)
+                            add(target.labelIds.backgroundId)
+                            if (wantSecondLine) add(target.labelIds.secondLineId)
+                        }.toIntArray(),
+                    ),
+                )
+            } catch (t2: Exception) {
+                RenderDiagnostics.recordError("label spawn rollback", t2)
+            }
         }
     }
 
@@ -761,7 +811,15 @@ internal class RenderService(initialSettings: RenderSettings) {
             placement(LabelLayer.SECOND_LINE),
         ).filterNotNull()
         if (packets.isNotEmpty()) {
-            RenderPackets.sendAll(listener, packets)
+            try {
+                RenderPackets.sendAll(listener, packets)
+            } catch (t: Exception) {
+                // Sent-caches below are only updated on success, so the
+                // next settings pass retries; never let one listener break
+                // the whole settings push loop.
+                RenderDiagnostics.recordError("placement push", t)
+                return
+            }
         }
         obs.sentFirstLineOffset = settings.firstLineOffset
         obs.sentSecondLineOffset = settings.secondLineOffset

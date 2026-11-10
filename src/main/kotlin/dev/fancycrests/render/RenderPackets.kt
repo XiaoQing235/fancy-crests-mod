@@ -116,6 +116,14 @@ object RenderPackets {
                         RenderDiagnostics.recordError("bypassed fallback send", e2)
                     }
                 }
+                // The transformer marks team creates as sent while
+                // *producing* the replacement list; a failed resend means
+                // the client may never have seen them. Let the service
+                // reset those flags so the next property update lazily
+                // re-creates the virtual teams.
+                if (listener is ServerGamePacketListenerImpl) {
+                    active?.onOutboundResendFailed(listener)
+                }
             }
         } finally {
             bypass.set(old)
