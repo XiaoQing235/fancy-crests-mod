@@ -120,8 +120,14 @@ class SqliteStorage(
             unavailableReason = null
             data
         } catch (e: Exception) {
-            // The connection may already be open when the schema check fails;
-            // keeping it open is fine, but no write may ever reach it.
+            // The connection may already be open when verification fails:
+            // close it right here instead of leaking it until stop().
+            if (this::connection.isInitialized) {
+                try {
+                    connection.close()
+                } catch (_: Exception) {
+                }
+            }
             usable = false
             unavailableReason = e.message ?: e.javaClass.simpleName
             throw e
@@ -132,6 +138,8 @@ class SqliteStorage(
     fun stop() {
         if (stopped) return
         stopped = true
+        // Route later enqueue* calls into the unified rejection path.
+        usable = false
         writeExecutor.execute {
             try {
                 connection.close()
