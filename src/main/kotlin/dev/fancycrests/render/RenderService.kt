@@ -2,6 +2,7 @@ package dev.fancycrests.render
 
 import dev.fancycrests.api.DisplaySnapshot
 import dev.fancycrests.api.RenderSettings
+import dev.fancycrests.mixin.ServerCommonPacketListenerImplAccessor
 import net.fabricmc.fabric.api.entity.event.v1.ServerEntityLevelChangeEvents
 import net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents
@@ -275,6 +276,12 @@ internal class RenderService(initialSettings: RenderSettings) {
         // threads fall through unchanged until a main-thread attach happens.
         val server = this.server ?: serverOf(listener) ?: return null
         if (!server.isSameThread) return null
+        // Never (re)build state for a dead connection. In the disconnect
+        // race (onDisconnect removed the state while this send was already
+        // on the main thread) a rebuild would create bookkeeping that no
+        // event ever clears again, leaking until stop(); the packets of a
+        // closed channel are dropped by netty anyway, so pass through.
+        if (!isConnectionLive(listener)) return null
         if (connections.containsKey(listener)) {
             // Attached concurrently while we resolved the server.
             val state = connections[listener]!!
@@ -295,6 +302,20 @@ internal class RenderService(initialSettings: RenderSettings) {
 
     private fun serverOf(listener: ServerGamePacketListenerImpl): MinecraftServer? =
         listener.player.level().server
+
+    /**
+     * True when the listener's channel can still carry packets. 26.2 has no
+     * `ServerCommonPacketListenerImpl.isDisconnected()`; the authoritative
+     * check is `Connection.isConnected()` (channel non-null and open) on the
+     * protected `connection` field exposed via accessor mixin. Defaults to
+     * "live" when the accessor is somehow absent (fail-open).
+     */
+    private fun isConnectionLive(listener: ServerGamePacketListenerImpl): Boolean {
+        val connection = (listener as? ServerCommonPacketListenerImplAccessor)
+            ?.`fancycrests$connection`()
+            ?: return true
+        return connection.isConnected
+    }
 
     /**
      * Creates (or returns) the per-connection state, seeding the source team
@@ -414,6 +435,19 @@ internal class RenderService(initialSettings: RenderSettings) {
         for (player in server.playerList.players) {
             if (!connections.containsKey(player.connection)) {
                 attachConnection(player.connection, flushInit = true)
+            }
+        }
+
+        // Reverse sweep: release state of connections that left the player
+        // list without a DISCONNECT event reaching us yet (disconnect race:
+        // a main-thread send already raced past onDisconnect). end-tick runs
+        // on the main thread, so touching the connection map is safe here.
+        // onDisconnect itself is idempotent (missing state -> no-op).
+        if (connections.isNotEmpty()) {
+            val live = HashSet<ServerGamePacketListenerImpl>(server.playerList.players.size * 2)
+            for (player in server.playerList.players) live.add(player.connection)
+            for (listener in connections.keys.toList()) {
+                if (listener !in live) onDisconnect(listener)
             }
         }
 
