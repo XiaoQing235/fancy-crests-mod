@@ -3,6 +3,7 @@ package dev.fancycrests.core.resolve
 import dev.fancycrests.api.DisplaySnapshot
 import dev.fancycrests.api.HeadDisplayChannel
 import dev.fancycrests.api.PermissionVerdict
+import dev.fancycrests.api.PlaceholderRequest
 import dev.fancycrests.api.PlayerTitleState
 import dev.fancycrests.api.TitleId
 import dev.fancycrests.core.ServerAdapter
@@ -12,6 +13,8 @@ import dev.fancycrests.core.config.LegacyTextParser
 import dev.fancycrests.core.config.SecondLineRuleConfig
 import dev.fancycrests.core.config.TemplateSegment
 import dev.fancycrests.core.permission.PermissionManager
+import dev.fancycrests.core.refresh.PlaceholderServiceImpl
+import dev.fancycrests.core.refresh.TemplateEngine
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import net.minecraft.network.chat.Component
@@ -24,6 +27,20 @@ data class ResolvedDisplay(
 )
 
 /**
+ * Immutable per-target view of everything published by
+ * [SnapshotPublisher]: the player state, the profile name captured at
+ * resolve time and the newest snapshot. Read from any thread by the built-in
+ * placeholder resolvers and external export adapters.
+ */
+data class PublishedPlayerView(
+    val target: UUID,
+    val profileName: String?,
+    val state: PlayerTitleState,
+    /** Newest published snapshot; null before the first publish. */
+    val snapshot: DisplaySnapshot?,
+)
+
+/**
  * Assembles the observer-independent display of one player.
  *
  * First line: walks the admin template segments in order. Empty segments
@@ -33,8 +50,11 @@ data class ResolvedDisplay(
  * flattened to plain text on the way.
  *
  * Second line: rules sorted by priority descending, ties broken by stable
- * ascending id; the first rule whose condition matches wins. P2 conditions
- * are `dimension` and `permission` (AND). No match → null.
+ * ascending id; the first rule whose condition matches wins. Conditions
+ * are `dimension` and `permission` (AND). No match → null. The rule template
+ * is rendered through the shared [TemplateEngine]: static text keeps the P2
+ * [LegacyTextParser] semantics, `%fancycrests:key%` tokens resolve through
+ * the placeholder service (P3).
  *
  * Effective display name: the nickname, or the current GameProfile name
  * (provided by the caller via [ServerAdapter.profileName]).
@@ -43,6 +63,7 @@ class SnapshotResolver(
     private val catalog: CatalogService,
     private val permissions: PermissionManager,
     private val configProvider: () -> FancyCrestsConfig,
+    private val templateEngine: TemplateEngine = TemplateEngine(PlaceholderServiceImpl()),
 ) {
 
     fun resolve(state: PlayerTitleState, profileName: String, dimensionKey: String?): ResolvedDisplay {
@@ -55,6 +76,21 @@ class SnapshotResolver(
             secondLine = secondLine?.second,
             matchedRuleId = secondLine?.first?.id,
         )
+    }
+
+    /** The rule that would currently match [uuid], without rendering it. */
+    fun matchedRule(uuid: UUID, dimensionKey: String?): SecondLineRuleConfig? {
+        for (rule in configProvider().sortedSecondLineRules()) {
+            val condition = rule.condition ?: return rule
+            if (condition.dimension != null && condition.dimension != dimensionKey) continue
+            if (condition.permission != null &&
+                permissions.check(uuid, condition.permission) != PermissionVerdict.ALLOW
+            ) {
+                continue
+            }
+            return rule
+        }
+        return null
     }
 
     // ------------------------------------------------------------------
@@ -118,21 +154,26 @@ class SnapshotResolver(
     // Second line
     // ------------------------------------------------------------------
 
-    /** Returns the first matching rule plus its parsed template, or null. */
+    /** Returns the first matching rule plus its rendered template, or null. */
     internal fun matchSecondLine(
         sortedRules: List<SecondLineRuleConfig>,
         uuid: UUID,
         dimensionKey: String?,
     ): Pair<SecondLineRuleConfig, Component>? {
         for (rule in sortedRules) {
-            val condition = rule.condition ?: return rule to LegacyTextParser.parse(rule.template)
-            if (condition.dimension != null && condition.dimension != dimensionKey) continue
-            if (condition.permission != null &&
-                permissions.check(uuid, condition.permission) != PermissionVerdict.ALLOW
-            ) {
-                continue
+            val condition = rule.condition
+            if (condition != null) {
+                if (condition.dimension != null && condition.dimension != dimensionKey) continue
+                if (condition.permission != null &&
+                    permissions.check(uuid, condition.permission) != PermissionVerdict.ALLOW
+                ) {
+                    continue
+                }
             }
-            return rule to LegacyTextParser.parse(rule.template)
+            val rendered = templateEngine.withSecondLineResolution(uuid) {
+                templateEngine.render(rule.template, PlaceholderRequest(uuid, observer = null))
+            }
+            return rule to rendered.component
         }
         return null
     }
@@ -140,9 +181,13 @@ class SnapshotResolver(
 
 /**
  * Publishes [DisplaySnapshot]s through the injected [HeadDisplayChannel]
- * reference. The channel is constructed/wired by the integration layer; when
- * it is absent (head channel disabled or renderer not ready) publishing is a
- * noop. Snapshot versions increment per target.
+ * reference and maintains the immutable [PublishedPlayerView] store consumed
+ * by the built-in placeholders, the chat/tab channels and export adapters.
+ * The channel is constructed/wired by the integration layer; when it is
+ * absent (head channel disabled or renderer not ready) the snapshot is still
+ * resolved and stored — chat, tab list and placeholder export keep working —
+ * only the head rendering forward is skipped. Snapshot versions increment
+ * per target.
  */
 class SnapshotPublisher(
     private val resolver: SnapshotResolver,
@@ -151,38 +196,77 @@ class SnapshotPublisher(
     private val channelProvider: () -> HeadDisplayChannel?,
 ) {
     private val versions = ConcurrentHashMap<UUID, Long>()
+    private val views = ConcurrentHashMap<UUID, PublishedPlayerView>()
 
     /** Number of distinct targets that received at least one snapshot. */
     val trackedTargets: Int get() = versions.size
+
+    /** Newest immutable published view of a target, or null when never published. */
+    fun latestView(uuid: UUID): PublishedPlayerView? = views[uuid]
 
     /**
      * Resolves and publishes the current snapshot of [state]. Called on the
      * main thread after every committed state change or recheck.
      */
     fun publish(state: PlayerTitleState) {
-        val channel = channelProvider() ?: return
-        val profileName = adapter.profileName(state.uuid) ?: "Unknown"
-        val dimensionKey = adapter.dimensionKey(state.uuid)
-        val resolved = resolver.resolve(state, profileName, dimensionKey)
-        val version = versions.merge(state.uuid, 1L, Long::plus) ?: 1L
-        channel.publish(
-            DisplaySnapshot(
-                target = state.uuid,
-                firstLine = resolved.firstLine,
-                secondLine = resolved.secondLine,
-                matchedSecondLineRuleId = resolved.matchedRuleId,
-                version = version,
-                resolvedAtTick = adapter.currentTick(),
-            ),
-        )
+        val profileName = currentProfileName(state.uuid)
+        // Stage the view first so placeholder resolvers (nickname/prefix/
+        // suffix) read the fresh immutable state during the resolve below.
+        views[state.uuid] = PublishedPlayerView(state.uuid, profileName, state, views[state.uuid]?.snapshot)
+        val resolved = resolver.resolve(state, profileName, adapter.dimensionKey(state.uuid))
+        publishResolved(state.uuid, profileName, state, resolved)
     }
 
-    /** Drops rendering for a target (logout, channel disabled). */
+    /**
+     * Periodic re-resolution used by the refresh scheduler: resolves the
+     * current state and publishes only when the resolved content actually
+     * changed (first line, second line or matched rule). Returns true when a
+     * new snapshot was published.
+     */
+    fun publishIfChanged(state: PlayerTitleState): Boolean {
+        val profileName = currentProfileName(state.uuid)
+        views[state.uuid] = PublishedPlayerView(state.uuid, profileName, state, views[state.uuid]?.snapshot)
+        val resolved = resolver.resolve(state, profileName, adapter.dimensionKey(state.uuid))
+        val previous = views[state.uuid]?.snapshot
+        if (previous != null &&
+            previous.firstLine == resolved.firstLine &&
+            previous.secondLine == resolved.secondLine &&
+            previous.matchedSecondLineRuleId == resolved.matchedRuleId
+        ) {
+            return false
+        }
+        publishResolved(state.uuid, profileName, state, resolved)
+        return true
+    }
+
+    /** Drops head rendering for a target (logout, channel disabled). */
     fun clearTarget(uuid: UUID) {
         channelProvider()?.clearTarget(uuid)
     }
 
     fun reset() {
         versions.clear()
+    }
+
+    private fun currentProfileName(uuid: UUID): String =
+        adapter.profileName(uuid) ?: views[uuid]?.profileName ?: "Unknown"
+
+    private fun publishResolved(
+        uuid: UUID,
+        profileName: String,
+        state: PlayerTitleState,
+        resolved: ResolvedDisplay,
+    ) {
+        val version = versions.merge(uuid, 1L, Long::plus) ?: 1L
+        val snapshot = DisplaySnapshot(
+            target = uuid,
+            firstLine = resolved.firstLine,
+            secondLine = resolved.secondLine,
+            matchedSecondLineRuleId = resolved.matchedRuleId,
+            version = version,
+            resolvedAtTick = adapter.currentTick(),
+        )
+        views[uuid] = PublishedPlayerView(uuid, profileName, state, snapshot)
+        channelProvider()?.publish(snapshot)
     }
 }
