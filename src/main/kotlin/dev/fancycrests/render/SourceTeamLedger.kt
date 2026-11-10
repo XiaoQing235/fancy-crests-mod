@@ -91,6 +91,19 @@ class SourceTeamLedger {
 
     fun teamCount(): Int = teams.size
 
+    /**
+     * Clears all team and membership knowledge (used when the client this
+     * ledger mirrors lost its world view, e.g. its player respawned: the
+     * observer's client receives a fresh entity/tracking stream and its
+     * scoreboard must be re-derived). Callers re-seed via
+     * [teamCreated] snapshots of the live server scoreboard, which is the
+     * authoritative state the client mirrors.
+     */
+    fun reset() {
+        teams.clear()
+        memberToTeam.clear()
+    }
+
     /** Team create / re-create; replaces props and resets membership to [members]. */
     fun teamCreated(name: String, props: SourceTeamProps, members: Collection<String>) {
         teams[name] = props

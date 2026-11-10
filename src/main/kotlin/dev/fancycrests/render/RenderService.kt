@@ -100,8 +100,15 @@ internal class RenderService(initialSettings: RenderSettings) {
         ServerPlayConnectionEvents.DISCONNECT.register { handler, _ ->
             if (isCurrent()) onDisconnect(handler)
         }
-        ServerPlayerEvents.AFTER_RESPAWN.register { oldPlayer, _, _ ->
-            if (isCurrent()) onTargetEntityReplaced(oldPlayer)
+        ServerPlayerEvents.AFTER_RESPAWN.register { oldPlayer, newPlayer, _ ->
+            if (isCurrent()) {
+                // Both sides of the same respawn: the respawned player is
+                // an observer whose client rebuilt its world view, and (as
+                // a target) keeps its entity id (respawn preserves it), so
+                // only the allocation sweep runs for it.
+                onObserverClientWorldReset(newPlayer)
+                onTargetEntityReplaced(oldPlayer)
+            }
         }
         ServerEntityLevelChangeEvents.AFTER_PLAYER_CHANGE_LEVEL.register { player, _, _ ->
             if (isCurrent()) onTargetEntityReplaced(player)
@@ -409,8 +416,7 @@ internal class RenderService(initialSettings: RenderSettings) {
         }
     }
 
-    private fun onTargetEntityReplaced(player: ServerPlayer) {
-        val target = targets[player.uuid] ?: return
+    private fun onTargetEntityReplaced(player: ServerPlayer) {        val target = targets[player.uuid] ?: return
         if (target.currentEntityId == player.id) return
         // Respawn / dimension change of the target: old entity id (and any
         // labels bound to it) are invalid. Observer states were cleaned by
@@ -493,6 +499,53 @@ internal class RenderService(initialSettings: RenderSettings) {
         }
     }
 
+    /**
+     * Observer-side respawn handling (the respawned player as an observer).
+     *
+     * Why this exists: a respawn keeps the same ServerGamePacketListenerImpl
+     * (only the ServerPlayer object is replaced), so our per-connection
+     * state survives while the client rebuilds its world view around the
+     * RespawnPacket. Same-dimension respawn does not swap the ServerLevel
+     * instance, so the end-tick world-generation guard never fires either.
+     * The old observer label states are therefore meaningless afterwards:
+     * if any survived the untrack/retrack storm, the next START_TRACKING
+     * would hit spawnLabels' "existing != null && same target entity id"
+     * early-exit (respawn even preserves the player's entity id) and only
+     * re-merge passengers - never re-sending AddEntity/metadata, leaving
+     * labels permanently invisible for this observer.
+     *
+     * Reset mirrors "client has a fresh world" without sending anything:
+     * - state.targets dropped without delete packets: the client either no
+     *   longer holds those entities (fresh world) or vanilla's own
+     *   RemoveEntities flow already removed them; a delete would reference
+     *   entities that may not exist. observerCount is decremented per entry
+     *   (virtualEntities is NOT touched: those ids belong to the shared
+     *   target-side allocation and stay valid for the next spawn).
+     * - overlays keep their identities but teamSent is reset, so the next
+     *   property update re-creates the virtual team (idempotent client-side
+     *   if it somehow survived).
+     * - the source-team ledger is reset and re-seeded from the live server
+     *   scoreboard, which is exactly the state the client mirrors.
+     *
+     * Subsequent START_TRACKING events (vanilla re-registers the new player
+     * object with every TrackedEntity) then take the full spawnLabels path.
+     */
+    private fun onObserverClientWorldReset(player: ServerPlayer) {
+        val state = connections[player.connection] ?: return
+        val server = this.server ?: return
+        synchronized(state.lock) {
+            for ((_, obs) in state.targets) {
+                adjustRelation(targets[obs.targetUuid], -1)
+            }
+            state.targets.clear()
+            for (overlay in state.overlays.values) {
+                overlay.teamSent = false
+            }
+            state.ledger.reset()
+            seedLedger(state, server)
+        }
+    }
+
     // =================================================================
     // Label spawn / cleanup primitives
     // =================================================================
@@ -525,9 +578,15 @@ internal class RenderService(initialSettings: RenderSettings) {
         }
 
         val existing = state.targets[target.uuid]
-        if (existing != null && existing.targetEntityId == targetEntityId) {
-            // Already spawned on this connection (e.g. re-track in same
-            // world): just re-merge passengers defensively and return.
+        if (existing != null && existing.targetEntityId == targetEntityId &&
+            existing.worldGeneration == state.worldGeneration
+        ) {
+            // Already spawned on this connection in the *current* client
+            // world (e.g. re-track in the same world): just re-merge
+            // passengers defensively and return. Entries from an older
+            // world generation must not take this path: the client rebuilt
+            // its world since they were sent, so falling through to the
+            // full spawn is the only way the labels come back.
             existing.lastRealPassengers = player.passengers.map { it.id }
             sendMergedPassengers(listener, existing, existing.lastRealPassengers)
             return
