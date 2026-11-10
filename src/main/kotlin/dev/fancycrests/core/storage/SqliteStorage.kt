@@ -68,6 +68,8 @@ class SqliteStorage(
     companion object {
         const val SCHEMA_VERSION = 1
         private const val MEMORY_URL = "jdbc:sqlite::memory:"
+        private const val UNAVAILABLE_PREFIX = "persistence is unavailable: "
+        private const val UNAVAILABLE_FALLBACK = "storage was not started"
     }
 
     private val gson = Gson()
@@ -79,6 +81,20 @@ class SqliteStorage(
 
     @Volatile
     private var stopped = false
+
+    /**
+     * True only after [start] verified the schema and loaded the data. Every
+     * write path checks it: a store that failed to open must never be used,
+     * even when the file happens to keep a compatible table layout.
+     */
+    @Volatile
+    var usable: Boolean = false
+        private set
+
+    /** Why [usable] is false (diagnostics and write rejections). */
+    @Volatile
+    var unavailableReason: String? = null
+        private set
 
     // ----------------------------------------------------------------------
     // Lifecycle
@@ -92,13 +108,24 @@ class SqliteStorage(
     fun start(): LoadedData {
         val url = databasePath?.let { "jdbc:sqlite:$it" } ?: MEMORY_URL
         databasePath?.let { path -> path.toAbsolutePath().parent?.let { java.nio.file.Files.createDirectories(it) } }
-        connection = DriverManager.getConnection(url)
-        connection.createStatement().use { statement ->
-            statement.execute("PRAGMA journal_mode=WAL")
-            statement.execute("PRAGMA foreign_keys=ON")
+        return try {
+            connection = DriverManager.getConnection(url)
+            connection.createStatement().use { statement ->
+                statement.execute("PRAGMA journal_mode=WAL")
+                statement.execute("PRAGMA foreign_keys=ON")
+            }
+            verifyOrCreateSchema()
+            val data = loadAll()
+            usable = true
+            unavailableReason = null
+            data
+        } catch (e: Exception) {
+            // The connection may already be open when the schema check fails;
+            // keeping it open is fine, but no write may ever reach it.
+            usable = false
+            unavailableReason = e.message ?: e.javaClass.simpleName
+            throw e
         }
-        verifyOrCreateSchema()
-        return loadAll()
     }
 
     /** Closes the write queue and the connection. Queued writes finish first. */
@@ -231,6 +258,11 @@ class SqliteStorage(
      * expected 0).
      */
     fun enqueueSaveState(state: PlayerTitleState, expectedRevision: Long, callback: (StateSaveResult) -> Unit) {
+        if (!usable) {
+            val reason = UNAVAILABLE_PREFIX + (unavailableReason ?: UNAVAILABLE_FALLBACK)
+            mainExecutor.execute { callback(StateSaveResult.Error(IllegalStateException(reason))) }
+            return
+        }
         writeExecutor.execute {
             val result = try {
                 val rows = connection.prepareStatement(
@@ -265,6 +297,11 @@ class SqliteStorage(
     }
 
     fun enqueueUpsertOwnership(record: OwnershipRecord, callback: (OwnershipWriteResult) -> Unit) {
+        if (!usable) {
+            val reason = UNAVAILABLE_PREFIX + (unavailableReason ?: UNAVAILABLE_FALLBACK)
+            mainExecutor.execute { callback(OwnershipWriteResult.Error(IllegalStateException(reason))) }
+            return
+        }
         writeExecutor.execute {
             val result = try {
                 val rows = connection.prepareStatement(
@@ -294,6 +331,11 @@ class SqliteStorage(
         source: String,
         callback: (OwnershipWriteResult) -> Unit,
     ) {
+        if (!usable) {
+            val reason = UNAVAILABLE_PREFIX + (unavailableReason ?: UNAVAILABLE_FALLBACK)
+            mainExecutor.execute { callback(OwnershipWriteResult.Error(IllegalStateException(reason))) }
+            return
+        }
         writeExecutor.execute {
             val result = try {
                 val rows = connection.prepareStatement(
