@@ -6,6 +6,9 @@ import dev.fancycrests.core.resolve.SnapshotPublisher
 import dev.fancycrests.core.resolve.SnapshotResolver
 import java.util.TreeMap
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 
 /**
  * Tick-driven re-resolution of dynamic second-line templates (plan chapter 4
@@ -39,6 +42,14 @@ class RefreshScheduler(
     private val stateOf: (UUID) -> dev.fancycrests.api.PlayerTitleState,
     private val publisher: SnapshotPublisher,
 ) {
+    private val logger: Logger = LoggerFactory.getLogger("FancyCrests/Refresh")
+
+    /** Minimum interval between error logs for the same player. */
+    private val errorLogIntervalMs = 60_000L
+
+    /** Per-player timestamp of the last logged refresh failure. */
+    private val lastErrorLoggedAt = ConcurrentHashMap<UUID, Long>()
+
     /** rule id -> refresh period (dynamic rules only). Main-thread mutated. */
     private var rulePeriods: Map<String, Int> = emptyMap()
 
@@ -84,12 +95,22 @@ class RefreshScheduler(
 
     private fun onTick() {
         if (!active.get() || rulePeriods.isEmpty()) return
-        val now = adapter.currentTick()
-        val duePeriods = nextDue.entries.filter { it.value <= now }.map { it.key }
-        if (duePeriods.isEmpty()) return
-        for (period in duePeriods) {
-            nextDue[period] = now + period
-            refreshGroup(period)
+        // This runs inside END_SERVER_TICK: nothing here may ever throw,
+        // or a single failing refresh takes the whole server down.
+        try {
+            val now = adapter.currentTick()
+            val duePeriods = nextDue.entries.filter { it.value <= now }.map { it.key }
+            if (duePeriods.isEmpty()) return
+            for (period in duePeriods) {
+                nextDue[period] = now + period
+                try {
+                    refreshGroup(period)
+                } catch (t: Throwable) {
+                    logger.error("Second-line refresh group (period {} ticks) failed", period, t)
+                }
+            }
+        } catch (t: Throwable) {
+            logger.error("Second-line refresh tick failed", t)
         }
     }
 
@@ -97,10 +118,26 @@ class RefreshScheduler(
         val ruleIds = rulePeriods.filterValues { it == period }.keys
         if (ruleIds.isEmpty()) return
         for (uuid in adapter.onlinePlayerUuids()) {
-            val matched = resolver.matchedRule(uuid, adapter.dimensionKey(uuid)) ?: continue
-            if (matched.id in ruleIds) {
-                publisher.publishIfChanged(stateOf(uuid))
+            try {
+                val matched = resolver.matchedRule(uuid, adapter.dimensionKey(uuid)) ?: continue
+                if (matched.id in ruleIds) {
+                    publisher.publishIfChanged(stateOf(uuid))
+                }
+            } catch (t: Throwable) {
+                // One player's failure (e.g. a LuckPerms backend throwing in
+                // matchedRule) must not abort the refresh of the others, nor
+                // flood the log every tick.
+                logPlayerFailure(uuid, t)
             }
         }
+    }
+
+    /** Logs at most once per [errorLogIntervalMs] for the same player. */
+    private fun logPlayerFailure(uuid: UUID, t: Throwable) {
+        val now = System.currentTimeMillis()
+        val last = lastErrorLoggedAt[uuid] ?: 0L
+        if (now - last < errorLogIntervalMs) return
+        lastErrorLoggedAt[uuid] = now
+        logger.error("Second-line refresh failed for player {}; other players are unaffected", uuid, t)
     }
 }
