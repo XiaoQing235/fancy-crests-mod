@@ -582,7 +582,13 @@ class ConfigService(
             val slot = when (slotText?.lowercase()?.trim()) {
                 "prefix" -> TitleSlot.PREFIX
                 "suffix" -> TitleSlot.SUFFIX
-                null -> null
+                null -> {
+                    // Missing (or null) slot used to drop the title silently, which
+                    // could then unequip it from every player on reload. A title
+                    // without a slot is a configuration error, not a skip.
+                    errors += ConfigError("$path.slot", "is required (must be prefix or suffix)")
+                    null
+                }
                 else -> {
                     errors += ConfigError("$path.slot", "must be prefix or suffix (was '$slotText')")
                     null
