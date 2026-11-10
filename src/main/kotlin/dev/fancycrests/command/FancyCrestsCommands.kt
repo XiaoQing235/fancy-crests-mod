@@ -14,6 +14,7 @@ import dev.fancycrests.core.config.ConfigLoadResult
 import dev.fancycrests.core.selection.RejectionReason
 import dev.fancycrests.core.selection.SelectionResult
 import dev.fancycrests.core.selection.UnequipTarget
+import dev.fancycrests.gui.TitleMenuService
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback
 import net.minecraft.commands.CommandSourceStack
 import net.minecraft.commands.Commands
@@ -42,6 +43,8 @@ object FancyCrestsCommands {
             dispatcher.register(build(core, "names"))
             dispatcher.register(build(core, "customnames"))
         }
+        // Player-side feedback (eligibility loss notices, admin op logging).
+        PlayerFeedback.attach(core)
     }
 
     /** Builds one root literal with the full subtree. */
@@ -191,9 +194,9 @@ object FancyCrestsCommands {
 
     private fun runMenu(ctx: CommandContext<CommandSourceStack>, core: CoreServices): Int {
         val source = ctx.source
-        if (CommandSupport.requirePlayer(source) == null) return 0
+        val player = CommandSupport.requirePlayer(source) ?: return 0
         if (!CommandSupport.requirePermission(source, core, Permissions.MENU)) return 0
-        return source.success("The title menu will arrive in a future version.")
+        return if (TitleMenuService.open(player, core)) Command.SINGLE_SUCCESS else 0
     }
 
     private fun runEquip(ctx: CommandContext<CommandSourceStack>, core: CoreServices, slot: TitleSlot): Int {
@@ -259,6 +262,17 @@ object FancyCrestsCommands {
                     "Revoked local grant of '${titleId.value}' from ${target.displayName} (${target.uuid})."
                 },
             )
+            // Player-side notice for the affected player (online only).
+            if (result is SelectionResult.Success) {
+                val notice = Component.literal(
+                    if (grant) {
+                        "An administrator granted you the title '${titleId.value}'."
+                    } else {
+                        "An administrator revoked your local grant of '${titleId.value}'."
+                    },
+                )
+                core.serverAdapter.sendSystemMessage(target.uuid, notice)
+            }
         }
         if (grant) {
             core.selectionService.grant(target.uuid, titleId, "local", "command", callback)
