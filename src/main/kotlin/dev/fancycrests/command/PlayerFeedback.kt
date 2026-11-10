@@ -31,13 +31,35 @@ object PlayerFeedback {
     /** Minimum interval between identical (uuid, type) log entries. */
     private const val LOG_INTERVAL_MS = 5_000L
 
+    /**
+     * Hard cap for both bookkeeping maps. grant/revoke accept arbitrary
+     * offline UUIDs, so the tables have no natural upper bound from the
+     * online player count. Internal for tests.
+     */
+    internal const val MAP_CAPACITY = 4_096
+
+    /**
+     * Inserts into a bounded map. Strategy: when the cap is reached the whole
+     * table is dropped. That is the simplest reliable policy (no insertion
+     * order tracking, no second map of keys) and both maps only hold
+     * best-effort cosmetics — the cost of a clear is one throttle window
+     * that may log slightly more and at most one lost recheck notice. The
+     * check-then-insert pair can overshoot by a few entries under concurrent
+     * writers; the map stays bounded either way. Internal for tests.
+     */
+    internal fun <K, V> insertBounded(map: ConcurrentHashMap<K, V>, key: K, value: V) {
+        if (map.size >= MAP_CAPACITY) map.clear()
+        map[key] = value
+    }
+
     @Volatile
     private var attached = false
 
-    /** opId -> titles removed by that pending recheck. */
-    private val pendingRecheckRemovals = ConcurrentHashMap<String, List<Pair<TitleId, dev.fancycrests.api.TitleSlot>>>()
+    /** opId -> titles removed by that pending recheck. Internal for tests. */
+    internal val pendingRecheckRemovals = ConcurrentHashMap<String, List<Pair<TitleId, dev.fancycrests.api.TitleSlot>>>()
 
-    private val lastLoggedAt = ConcurrentHashMap<String, Long>()
+    /** Internal for tests. */
+    internal val lastLoggedAt = ConcurrentHashMap<String, Long>()
 
     fun attach(core: CoreServices) {
         if (attached) return
@@ -58,14 +80,15 @@ object PlayerFeedback {
         core.eventBus.addPostListener { event -> onPost(event, core) }
     }
 
-    private fun onPre(event: TitleChangeEventPre) {
+    /** Internal for tests. */
+    internal fun onPre(event: TitleChangeEventPre) {
         if (event.type != TitleOperationType.RECHECK) return
         val removedPrefixes = event.current.prefixes - event.candidate.prefixes.toSet()
         val removedSuffixes = event.current.suffixes - event.candidate.suffixes.toSet()
         if (removedPrefixes.isEmpty() && removedSuffixes.isEmpty()) return
         val removed = removedPrefixes.map { it to dev.fancycrests.api.TitleSlot.PREFIX } +
             removedSuffixes.map { it to dev.fancycrests.api.TitleSlot.SUFFIX }
-        pendingRecheckRemovals[event.operationId.value] = removed
+        insertBounded(pendingRecheckRemovals, event.operationId.value, removed)
     }
 
     private fun onPost(event: dev.fancycrests.core.event.TitleChangeEventPost, core: CoreServices) {
@@ -96,13 +119,13 @@ object PlayerFeedback {
         )
     }
 
-    /** Logs [line] at INFO unless the same key fired within the throttle window. */
-    private fun throttledLog(uuid: java.util.UUID, key: String, line: String) {
+    /** Logs [line] at INFO unless the same key fired within the throttle window. Internal for tests. */
+    internal fun throttledLog(uuid: java.util.UUID, key: String, line: String) {
         val mapKey = "$uuid:$key"
         val now = System.currentTimeMillis()
         val last = lastLoggedAt[mapKey] ?: 0L
         if (now - last < LOG_INTERVAL_MS) return
-        lastLoggedAt[mapKey] = now
+        insertBounded(lastLoggedAt, mapKey, now)
         logger.info("$line (op log)")
     }
 }
