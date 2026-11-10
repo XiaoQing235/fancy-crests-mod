@@ -66,7 +66,7 @@ enum class TemplateSegmentType { PREFIXES, NAME, SUFFIXES }
 data class TemplateSegment(
     val type: TemplateSegmentType,
     val separator: String,
-    /** Optional legacy styling (§ codes) for the separator component. */
+    /** Optional legacy styling (& codes) for the separator component. */
     val separatorStyle: String?,
 )
 
@@ -74,7 +74,7 @@ data class TemplateSegment(
 data class SecondLineCondition(val dimension: String?, val permission: String?)
 
 /**
- * Admin-configured second-line rule. The template mixes static text (§ codes)
+ * Admin-configured second-line rule. The template mixes static text (& codes)
  * with built-in `%fancycrests:key%` placeholders; [refreshTicks] controls how
  * often dynamic templates are re-resolved.
  */
@@ -120,8 +120,8 @@ data class RenderConfig(
 }
 
 /**
- * Raw title entry as written in the config. [text] uses plain text plus §
- * legacy codes; [displayName] is plain text. Both are parsed to Components
+ * Raw title entry as written in the config. [text] uses plain text plus &
+ * (or §) legacy codes; [displayName] is plain text. Both are parsed to Components
  * when the catalog is built.
  */
 data class TitleConfig(
@@ -793,9 +793,9 @@ object DefaultConfig {
         ),
         permissions = PermissionsConfig(emptyMap()),
         firstLineTemplate = listOf(
-            TemplateSegment(TemplateSegmentType.PREFIXES, " ", "§7"),
+            TemplateSegment(TemplateSegmentType.PREFIXES, " ", "&7"),
             TemplateSegment(TemplateSegmentType.NAME, " ", null),
-            TemplateSegment(TemplateSegmentType.SUFFIXES, " ", "§7"),
+            TemplateSegment(TemplateSegmentType.SUFFIXES, " ", "&7"),
         ),
         secondLineRules = emptyList(),
         render = RenderConfig(

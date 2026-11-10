@@ -20,6 +20,10 @@ rendered to **vanilla clients**. No client-side mod is needed.
 > open: client-side rendering verification with vanilla 26.2 clients, performance
 > evidence, and the release package.
 
+> [!CAUTION]
+> Developed with assistance from **GPT-6-Astra**, **DeepSeek-V4.1-Flash-1017** and **GLM-5.3**.
+> Designed for my own server — use at your own risk.
+
 ## Features
 
 - **Prefixes and suffixes** — equip several per player, kept in equip order; slot limits are configurable.
@@ -117,10 +121,18 @@ configuration active and reports the offending JSON paths.
 | `firstLineTemplate` | Ordered segments of type `prefixes` / `name` / `suffixes`, each with `separator` and optional `separatorStyle` |
 | `secondLineRules` | `id`, `priority`, `condition` (`dimension` / `permission`), `template`, `refreshTicks` (1–72000, default 20) |
 | `render` | `distanceBlocks` and the first/second line offsets |
-| `titles` | `id`, `slot` (`prefix`/`suffix`), `displayName`, `text` (§ codes), `permission`, `category`, `iconItem`, `sortOrder` |
+| `titles` | `id`, `slot` (`prefix`/`suffix`), `displayName`, `text` (`&` codes), `permission`, `category`, `iconItem`, `sortOrder` |
 
 Titles with a `permission` are only equippable by players who own them locally or
 whose active permission backend allows the node.
+
+## Text formatting
+
+Title text, nickname input, `separatorStyle` and static template text accept classic
+colour codes with the `&` prefix (`&6Gold`, `&lbold`, `&r` resets) — easy to type in
+chat and config. The vanilla `§` prefix still works for existing configs. A doubled
+prefix (`&&`) escapes into a literal `&`, so plain text like `R&&D` stays intact; any
+unknown pair such as `Tom & Jerry` is also kept verbatim.
 
 ## Placeholders
 

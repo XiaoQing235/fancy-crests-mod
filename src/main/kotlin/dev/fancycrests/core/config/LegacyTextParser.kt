@@ -5,15 +5,26 @@ import net.minecraft.network.chat.Component
 import net.minecraft.network.chat.MutableComponent
 
 /**
- * Minimal legacy text parser: converts the vanilla `§` colour/format codes
- * into structured [Component]s. There is no MiniMessage in 26.2; the config
+ * Minimal legacy text parser: converts classic colour/format codes into
+ * structured [Component]s. There is no MiniMessage in 26.2; the config
  * accepts plain text plus these codes for title/rule styling.
+ *
+ * Two prefix characters are accepted:
+ *  - `&` — the primary, recommended form (easy to type in chat and config);
+ *  - `§` — the vanilla character, still accepted for compatibility with
+ *    existing configs and stored data.
  *
  * Supported codes: 0-9 a-f (colours), k (obfuscated), l (bold),
  * m (strikethrough), n (underline), o (italic), r (reset).
- * Unknown codes are dropped.
+ * Unknown codes are emitted literally. A doubled prefix (`&&` / `§§`)
+ * escapes into a single literal prefix character.
  */
 object LegacyTextParser {
+
+    private const val PRIMARY_PREFIX = '&'
+    private const val LEGACY_PREFIX = '§'
+
+    private fun isPrefix(c: Char): Boolean = c == PRIMARY_PREFIX || c == LEGACY_PREFIX
 
     private val colors: Map<Char, ChatFormatting> = buildMap {
         put('0', ChatFormatting.BLACK)
@@ -67,31 +78,47 @@ object LegacyTextParser {
             }
         }
 
+        fun appendLiteral(literalStart: Int, literalEnd: Int) {
+            flushPlain(literalStart)
+            val literal = Component.literal(input.substring(literalStart, literalEnd))
+            color?.let { literal.withStyle(it) }
+            if (activeDecorations.isNotEmpty()) {
+                literal.withStyle(*activeDecorations.toTypedArray())
+            }
+            root.append(literal)
+        }
+
         while (index < input.length) {
             val c = input[index]
-            if (c == '§' && index + 1 < input.length) {
-                flushPlain(index)
-                val code = input[index + 1].lowercaseChar()
+            if (isPrefix(c) && index + 1 < input.length) {
+                val next = input[index + 1]
                 when {
-                    code == 'r' -> {
+                    // Doubled prefix: escaped literal prefix character.
+                    next == c -> appendLiteral(index, index + 1)
+                    next.lowercaseChar() == 'r' -> {
+                        flushPlain(index)
                         color = null
                         activeDecorations.clear()
                     }
-                    colors.containsKey(code) -> {
-                        color = colors[code]
+                    colors.containsKey(next.lowercaseChar()) -> {
+                        flushPlain(index)
+                        color = colors[next.lowercaseChar()]
                         activeDecorations.clear()
                     }
-                    decorations.containsKey(code) -> activeDecorations.add(decorations[code]!!)
+                    decorations.containsKey(next.lowercaseChar()) -> {
+                        flushPlain(index)
+                        activeDecorations.add(decorations[next.lowercaseChar()]!!)
+                    }
                     else -> {
-                        // Unknown code: emit it literally so nothing is silently lost.
-                        val literal = Component.literal(input.substring(index, index + 2))
-                        color?.let { literal.withStyle(it) }
-                        root.append(literal)
+                        // Unknown code: emit it literally so nothing is
+                        // silently lost ("Tom & Jerry" keeps its ampersand).
+                        appendLiteral(index, index + 2)
                     }
                 }
                 index += 2
                 plainStart = index
             } else {
+                // Lone prefix at the very end stays as plain text.
                 index += 1
             }
         }
@@ -102,14 +129,21 @@ object LegacyTextParser {
         return if (siblings.size == 1 && root.style.isEmpty) siblings[0].copy() else root
     }
 
-    /** Strips all `§` codes (the code char plus its code) from [input]. */
+    /**
+     * Removes all colour/format code pairs (either prefix) from [input] so
+     * the result reflects the visible text. Doubled prefixes collapse into
+     * a single literal prefix character. A lone trailing prefix is kept.
+     */
     fun strip(input: String): String {
-        if (!input.contains('§')) return input
+        if (!containsLegacyCodes(input)) return input
         val sb = StringBuilder(input.length)
         var index = 0
         while (index < input.length) {
             val c = input[index]
-            if (c == '§' && index + 1 < input.length) {
+            if (isPrefix(c) && index + 1 < input.length) {
+                if (input[index + 1] == c) {
+                    sb.append(c)
+                }
                 index += 2
             } else {
                 sb.append(c)
@@ -119,6 +153,7 @@ object LegacyTextParser {
         return sb.toString()
     }
 
-    /** True when [input] contains any `§` format code. */
-    fun containsLegacyCodes(input: String): Boolean = input.indexOf('§') >= 0
+    /** True when [input] contains a `&` or `§` prefix character. */
+    fun containsLegacyCodes(input: String): Boolean =
+        input.indexOf(PRIMARY_PREFIX) >= 0 || input.indexOf(LEGACY_PREFIX) >= 0
 }
