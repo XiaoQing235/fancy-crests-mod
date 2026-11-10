@@ -25,6 +25,7 @@ bin/
 
 # fabric
 run/
+logs/
 
 # kotlin
 .kotlin/
