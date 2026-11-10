@@ -89,21 +89,27 @@ fun registerStandardPlaceholders(
         return if (root.siblings.size == 1) root.siblings[0].copy() else root
     }
 
-    service.register(StandardPlaceholders.PREFIX, PlaceholderResolver { _, request ->
-        equippedJoined(request, TitleSlot.PREFIX)
+    service.register(StandardPlaceholders.PREFIX, object : PlaceholderResolver {
+        override fun resolve(key: PlaceholderKey, request: PlaceholderRequest): Component? =
+            equippedJoined(request, TitleSlot.PREFIX)
     })
-    service.register(StandardPlaceholders.SUFFIX, PlaceholderResolver { _, request ->
-        equippedJoined(request, TitleSlot.SUFFIX)
+    service.register(StandardPlaceholders.SUFFIX, object : PlaceholderResolver {
+        override fun resolve(key: PlaceholderKey, request: PlaceholderRequest): Component? =
+            equippedJoined(request, TitleSlot.SUFFIX)
     })
-    service.register(StandardPlaceholders.NICKNAME, PlaceholderResolver { _, request ->
-        val state = stateOf(request.target)
-        state.nickname?.let { return@PlaceholderResolver Component.literal(it) }
-        viewOf(request.target)?.profileName?.let { return@PlaceholderResolver Component.literal(it) }
-        null
+    service.register(StandardPlaceholders.NICKNAME, object : PlaceholderResolver {
+        override fun resolve(key: PlaceholderKey, request: PlaceholderRequest): Component? {
+            val state = stateOf(request.target)
+            state.nickname?.let { return Component.literal(it) }
+            viewOf(request.target)?.profileName?.let { return Component.literal(it) }
+            return null
+        }
     })
-    service.register(StandardPlaceholders.BELOWNAME, PlaceholderResolver { _, request ->
-        // Cycle guard: never read (and thereby grow) the line being resolved.
-        if (engine.isSecondLineResolving(request.target)) return@PlaceholderResolver null
-        viewOf(request.target)?.snapshot?.secondLine?.copy()
+    service.register(StandardPlaceholders.BELOWNAME, object : PlaceholderResolver {
+        override fun resolve(key: PlaceholderKey, request: PlaceholderRequest): Component? {
+            // Cycle guard: never read (and thereby grow) the line being resolved.
+            if (engine.isSecondLineResolving(request.target)) return null
+            return viewOf(request.target)?.snapshot?.secondLine?.copy()
+        }
     })
 }

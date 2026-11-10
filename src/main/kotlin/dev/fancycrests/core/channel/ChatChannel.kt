@@ -39,7 +39,7 @@ class ChatChannel(private val firstLineOf: (UUID) -> Component?) {
         ServerMessageEvents.ALLOW_CHAT_MESSAGE.register { message, sender, _ ->
             if (!enabled || rebroadcasting) return@register true
             val firstLine = firstLineOf(sender.gameProfile.id()) ?: return@register true
-            val server = sender.server
+            val server = sender.level().getServer()
             val bound = ChatType.bind(ChatType.CHAT, server.registryAccess(), firstLine)
             rebroadcasting = true
             try {

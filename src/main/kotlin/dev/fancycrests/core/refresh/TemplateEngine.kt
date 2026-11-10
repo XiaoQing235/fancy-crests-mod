@@ -87,11 +87,18 @@ class TemplateEngine(private val placeholders: PlaceholderService) {
     /** Per-thread target whose second line is currently being resolved. */
     private val resolvingSecondLine = ThreadLocal<UUID?>()
 
+    /**
+     * Per-thread engine re-entry counter: a resolver that calls back into the
+     * engine increments it no matter which template it renders, capping
+     * recursive placeholder chains.
+     */
+    private val renderDepth = ThreadLocal.withInitial { 0 }
+
     /** True while [target]'s second line is being rendered on this thread. */
     fun isSecondLineResolving(target: UUID): Boolean = resolvingSecondLine.get() == target
 
     /** Runs [block] with the second-line marker set for [target]. */
-    inline fun <T> withSecondLineResolution(target: UUID, block: () -> T): T {
+    fun <T> withSecondLineResolution(target: UUID, block: () -> T): T {
         resolvingSecondLine.set(target)
         try {
             return block()
@@ -101,13 +108,24 @@ class TemplateEngine(private val placeholders: PlaceholderService) {
     }
 
     /**
-     * Renders [template] for [request]. [depth] is the engine re-entry depth
-     * (a placeholder resolver calling back into the engine); it is capped.
+     * Renders [template] for [request]. Engine re-entry (a resolver rendering
+     * another template on the same thread) is capped by [MAX_RENDER_DEPTH];
+     * output length and resolution steps are capped by simple counters.
      */
-    fun render(template: String, request: PlaceholderRequest, depth: Int = 0): Result {
+    fun render(template: String, request: PlaceholderRequest): Result {
+        val depth = renderDepth.get()
         if (depth > MAX_RENDER_DEPTH) {
             return Result(Component.empty(), emptyList(), truncated = true)
         }
+        renderDepth.set(depth + 1)
+        try {
+            return renderInner(template, request)
+        } finally {
+            renderDepth.set(depth)
+        }
+    }
+
+    private fun renderInner(template: String, request: PlaceholderRequest): Result {
         val segments = TemplateTokenizer.tokenize(template)
         if (segments.isEmpty()) return Result(Component.empty(), emptyList(), truncated = false)
 

@@ -86,6 +86,9 @@ class TitleMenu private constructor(
 
     private val viewerUuid: UUID = viewer.gameProfile.id()
 
+    /** Currently displayed page (0-based). */
+    private var page = 0
+
     /** Version the current rendering is based on. */
     private var renderedVersion: MenuVersion = captureVersion()
 
@@ -256,9 +259,11 @@ class TitleMenu private constructor(
         backing.setItem(45,ControlItem(Items.ARROW, "Previous page", canPrev))
         if (canPrev) actions[45] = MenuAction.PreviousPage
 
-        backing.setItem(49,ControlItem(Items.BOOK, "Titles — page ${page + 1}/$pages", true).copyLore {
-            +Component.literal("Equipped: ${state.prefixes.size + state.suffixes.size} title(s), " +
-                "nickname: ${state.nickname ?: "(profile name)"}").withStyle(ChatFormatting.GRAY)
+        backing.setItem(49,ControlItem(Items.BOOK, "Titles — page ${page + 1}/$pages", true).copyLore { lore ->
+            lore += Component.literal(
+                "Equipped: ${state.prefixes.size + state.suffixes.size} title(s), " +
+                    "nickname: ${state.nickname ?: "(profile name)"}",
+            ).withStyle(ChatFormatting.GRAY)
         })
 
         val canNext = page < pages - 1
@@ -270,10 +275,10 @@ class TitleMenu private constructor(
         if (nicknameConfig.allowSet &&
             core.permissionManager.check(viewerUuid, Permissions.NICKNAME_SET) == PermissionVerdict.ALLOW
         ) {
-            backing.setItem(46,ControlItem(Items.NAME_TAG, "Nickname", true).copyLore {
-                +Component.literal("Current: ${state.nickname ?: "(profile name)"}").withStyle(ChatFormatting.GRAY)
-                +Component.literal("Use /fancycrests nickname <text> to change it.").withStyle(ChatFormatting.GRAY)
-                +Component.literal("Use /fancycrests nickname reset to remove it.").withStyle(ChatFormatting.GRAY)
+            backing.setItem(46,ControlItem(Items.NAME_TAG, "Nickname", true).copyLore { lore ->
+                lore += Component.literal("Current: ${state.nickname ?: "(profile name)"}").withStyle(ChatFormatting.GRAY)
+                lore += Component.literal("Use /fancycrests nickname <text> to change it.").withStyle(ChatFormatting.GRAY)
+                lore += Component.literal("Use /fancycrests nickname reset to remove it.").withStyle(ChatFormatting.GRAY)
             })
             actions[46] = MenuAction.NicknameHint
         }
@@ -292,7 +297,7 @@ class TitleMenu private constructor(
         val locked = eligibility == Eligibility.NotEligible
 
         val base = when {
-            locked -> Items.GRAY_DYE
+            locked -> Items.DYE.gray()
             equippedIndex >= 0 -> Items.NAME_TAG
             else -> Items.PAPER
         }
@@ -369,9 +374,9 @@ private fun ControlItem(
     return stack
 }
 
-private inline fun ItemStack.copyLore(loreBuilder: MutableList<Component>.() -> Unit): ItemStack {
+private inline fun ItemStack.copyLore(loreBuilder: (MutableList<Component>) -> Unit): ItemStack {
     val lore = mutableListOf<Component>()
-    lore.loreBuilder()
+    loreBuilder(lore)
     set(DataComponents.LORE, ItemLore(lore))
     return this
 }
