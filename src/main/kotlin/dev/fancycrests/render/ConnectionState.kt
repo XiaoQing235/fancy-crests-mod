@@ -19,7 +19,32 @@ internal class PlayerOverlay(
     @JvmField var currentName: String,
     /** True once the create packet has been queued on the ordered send path. */
     @JvmField var teamSent: Boolean,
-)
+) {
+    /**
+     * Effective source team mirrored into the last create/modify packet
+     * produced for this overlay (team name + ledger props; `null` team means
+     * teamless, rendered with neutral properties). Used to short-circuit
+     * redundant property follow-ups: team create/remove/CHANGE/JOIN/LEAVE
+     * each recompute follow-ups for every affected member x connection, and
+     * without this cache a single CHANGE on a large team emits one modify
+     * packet per member per connection even when nothing observable changed.
+     *
+     * Equality is structural ([SourceTeamProps] is a data class over
+     * components/enums); a false "changed" verdict only costs one redundant
+     * packet, a false "unchanged" is impossible (different values compare
+     * unequal).
+     */
+    @JvmField var lastSentSourceTeam: String? = null
+    @JvmField var lastSentSourceProps: SourceTeamProps? = null
+
+    /**
+     * True when the client's virtual team for this overlay already reflects
+     * exactly [team]/[props] (and the create packet was sent at all), so no
+     * follow-up packet is needed.
+     */
+    fun matchesLastSent(team: String?, props: SourceTeamProps?): Boolean =
+        teamSent && lastSentSourceTeam == team && lastSentSourceProps == props
+}
 
 /**
  * Label-side state for one (observer connection, target) pair. Only exists

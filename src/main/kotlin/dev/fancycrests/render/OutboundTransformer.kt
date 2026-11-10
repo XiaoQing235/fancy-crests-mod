@@ -128,9 +128,14 @@ internal class OutboundTransformer(
         } else if (players.size == 1) {
             // Single taken-over member op: the client membership of this
             // player is owned by the virtual team; drop the source op and
-            // deliver only the property follow-ups (if the source changed).
+            // deliver only the property follow-ups (if the effective source
+            // changed). Returning the list as-is matters: null would deliver
+            // the source op unchanged and drag the member back into the
+            // source team client-side (a client entry lives in exactly one
+            // team), and an empty list means "drop entirely", which is the
+            // correct outcome when nothing observable changed.
             RenderDiagnostics.teamPacketsDropped.incrementAndGet()
-            followUps.ifEmpty { null }
+            followUps
         } else {
             // Mixed list (defensive; vanilla sends single-member packets):
             // rebuild keeping only non-taken entries.
@@ -154,13 +159,21 @@ internal class OutboundTransformer(
         for (name in playerNames) {
             val overlay = state.overlayOf(name) ?: continue
             val effective = state.ledger.teamOf(name)
+            val team = effective?.first
             val props = effective?.second
+            // Short-circuit: the client's virtual team already reflects this
+            // exact effective source, so a modify packet would be redundant.
+            // Teamless members compare as (null, null) - the neutral look is
+            // derived from the same member name, never re-sent.
+            if (overlay.matchesLastSent(team, props)) continue
             updates += if (overlay.teamSent) {
                 TeamPackets.modifyVirtual(overlay.virtualTeamName, overlay.currentName, props)
             } else {
                 overlay.teamSent = true
                 TeamPackets.createVirtual(overlay.virtualTeamName, overlay.currentName, props)
             }
+            overlay.lastSentSourceTeam = team
+            overlay.lastSentSourceProps = props
         }
         return updates
     }
@@ -200,10 +213,13 @@ internal class OutboundTransformer(
                     // Prepare the independent virtual team before the entity
                     // can show up on this client.
                     overlay.teamSent = true
+                    val effective = state.ledger.teamOf(name)
+                    overlay.lastSentSourceTeam = effective?.first
+                    overlay.lastSentSourceProps = effective?.second
                     followUps += TeamPackets.createVirtual(
                         overlay.virtualTeamName,
                         overlay.currentName,
-                        state.ledger.teamOf(name)?.second,
+                        effective?.second,
                     )
                     RenderDiagnostics.virtualTeams.incrementAndGet()
                 }
@@ -211,6 +227,10 @@ internal class OutboundTransformer(
                 val oldName = state.renameOverlay(existing, name)
                 followUps += TeamPackets.memberOp(existing.virtualTeamName, oldName, add = false)
                 followUps += TeamPackets.memberOp(existing.virtualTeamName, name, add = true)
+                // Neutral (teamless) virtual-team props embed the member
+                // name; force a refresh on the next property update.
+                existing.lastSentSourceTeam = null
+                existing.lastSentSourceProps = null
             }
         }
         return followUps.ifEmpty { null }?.let { listOf(packet) + it }

@@ -361,6 +361,8 @@ internal class RenderService(initialSettings: RenderSettings) {
             val overlay = state.addOverlay(player.uuid, player.gameProfile.name) ?: continue
             overlay.teamSent = true
             val effective = state.ledger.teamOf(overlay.currentName)
+            overlay.lastSentSourceTeam = effective?.first
+            overlay.lastSentSourceProps = effective?.second
             packets += TeamPackets.createVirtual(overlay.virtualTeamName, overlay.currentName, effective?.second)
             RenderDiagnostics.virtualTeams.incrementAndGet()
         }
@@ -540,6 +542,8 @@ internal class RenderService(initialSettings: RenderSettings) {
             state.targets.clear()
             for (overlay in state.overlays.values) {
                 overlay.teamSent = false
+                overlay.lastSentSourceTeam = null
+                overlay.lastSentSourceProps = null
             }
             state.ledger.reset()
             seedLedger(state, server)
