@@ -244,6 +244,19 @@ class SnapshotPublisher(
         channelProvider()?.clearTarget(uuid)
     }
 
+    /**
+     * Full logout cleanup of one target: head rendering plus the published
+     * view and version counter, so players who left never keep entries in
+     * the maps. Only this target's keys are removed; every other player's
+     * view stays live. Persisted selection state is untouched (it lives in
+     * the selection service and the database).
+     */
+    fun forgetTarget(uuid: UUID) {
+        channelProvider()?.clearTarget(uuid)
+        views.remove(uuid)
+        versions.remove(uuid)
+    }
+
     fun reset() {
         versions.clear()
     }

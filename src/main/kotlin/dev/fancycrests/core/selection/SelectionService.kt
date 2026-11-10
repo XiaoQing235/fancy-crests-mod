@@ -643,9 +643,20 @@ class SelectionService(
         revalidatePlayer(uuid, "login") {}
     }
 
-    /** Player left: stop rendering; persisted state stays untouched. */
+    /**
+     * Player left: stop rendering and drop the per-session bookkeeping. The
+     * persisted state map ([states]) is deliberately kept — persistence is
+     * not a session concern. The per-player operation queue is removed once
+     * it is drained; a still-pending operation keeps its queue until it
+     * completes (the completion path tolerates the missing entry).
+     */
     fun handlePlayerQuit(uuid: UUID) {
-        publisher.clearTarget(uuid)
+        publisher.forgetTarget(uuid)
+        queues.computeIfPresent(uuid) { _, deque ->
+            synchronized(deque) {
+                if (deque.isEmpty()) null else deque
+            }
+        }
     }
 
     /** True when [titleId] resolves in the catalog for [slot] and the player qualifies. */
