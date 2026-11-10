@@ -23,6 +23,9 @@ base {
 repositories {
 	// Loom adds the essential repositories (Fabric, Mojang, Maven Central) automatically.
 	// Only add repositories here when depending on other mods.
+	maven("https://api.modrinth.com/maven") {
+		name = "Modrinth"
+	}
 }
 
 loom {
@@ -47,6 +50,9 @@ dependencies {
 
 	testImplementation(kotlin("test"))
 
+	// Optional integrations (compile-only; guarded at runtime by mod presence).
+	compileOnly("net.luckperms:api:5.5")
+	compileOnly("maven.modrinth:placeholder-api:3.1.0-beta.1+26.2")
 }
 
 tasks.test {
