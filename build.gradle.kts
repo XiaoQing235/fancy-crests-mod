@@ -40,6 +40,17 @@ dependencies {
 
 	// Kotlin language adapter for Fabric; bundles the Kotlin runtime for the server.
 	implementation("net.fabricmc:fabric-language-kotlin:$fabricKotlinVersion")
+
+	// SQLite storage; bundled so servers need no extra install.
+	implementation("org.xerial:sqlite-jdbc:3.54.1.0")
+	include("org.xerial:sqlite-jdbc:3.54.1.0")
+
+	testImplementation(kotlin("test"))
+
+}
+
+tasks.test {
+	useJUnitPlatform()
 }
 
 tasks.processResources {
