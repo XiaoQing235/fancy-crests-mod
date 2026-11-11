@@ -57,7 +57,10 @@ class StorageSchemaException(message: String) : Exception(message)
  *   when `revision` still equals the expected value; 0 affected rows is
  *   reported as [StateSaveResult.RevisionConflict] and nothing is written.
  * - Schema version lives in `PRAGMA user_version`. An unsupported version
- *   refuses to load (data is never rewritten).
+ *   refuses to load (data is never rewritten). At the supported version a
+ *   table missing entirely (old-bug damage) is recreated empty — a missing
+ *   table holds no data — while tables that do exist must match the
+ *   expected layout.
  * - Read path: one full load at start into immutable in-memory state; after
  *   that only the write queue touches the connection.
  */
@@ -159,55 +162,53 @@ class SqliteStorage(
         val ownership: List<OwnershipRecord>,
     )
 
+    /**
+     * Verifies (or creates) the schema for the database's version.
+     *
+     * - version 0 (pre-versioning): every table that already exists must
+     *   match the expected layout — CREATE TABLE IF NOT EXISTS would
+     *   silently accept an incompatible layout and then stamp it as this
+     *   schema version, so a mismatch refuses to load without touching any
+     *   data. Missing tables are created, then the version is stamped.
+     * - version == [SCHEMA_VERSION]: tables that exist keep the same layout
+     *   check (a mismatch still refuses to load). Tables that are missing
+     *   are recreated: an older build's recovery bug could stamp version 1
+     *   on a database whose tables were never fully created, and a missing
+     *   table holds no data, so this is a safe automatic recovery of that
+     *   old damage (audit #3). The version stamp is not rewritten.
+     * - any other version: refused without modifying anything.
+     */
     private fun verifyOrCreateSchema() {
         connection.createStatement().use { statement ->
             val version = queryUserVersion(statement)
-            if (version == 0) {
-                // Pre-versioning database: CREATE TABLE IF NOT EXISTS would
-                // silently accept any incompatible layout and then stamp it
-                // as this schema version; verify the layout of every table
-                // that already exists and refuse (without touching any data)
-                // on mismatch.
-                if (tableExists(statement, "player_state")) {
-                    verifyTableLayout(statement, "player_state", EXPECTED_PLAYER_STATE_COLUMNS)
-                }
-                if (tableExists(statement, "ownership")) {
-                    verifyTableLayout(statement, "ownership", EXPECTED_OWNERSHIP_COLUMNS)
-                }
-                // Then create whatever is missing (a v0 database may hold
-                // only one of the two tables — audit #5: skipping creation
-                // here left the missing table absent forever while the
-                // version was stamped, so loadAll failed with no self-heal).
-                statement.executeUpdate(
-                    """
-                    CREATE TABLE IF NOT EXISTS player_state (
-                        uuid TEXT PRIMARY KEY,
-                        prefixes TEXT NOT NULL,
-                        suffixes TEXT NOT NULL,
-                        nickname TEXT NULL,
-                        revision INTEGER NOT NULL
-                    )
-                    """.trimIndent(),
-                )
-                statement.executeUpdate(
-                    """
-                    CREATE TABLE IF NOT EXISTS ownership (
-                        uuid TEXT NOT NULL,
-                        titleId TEXT NOT NULL,
-                        source TEXT NOT NULL,
-                        grantedAt INTEGER NOT NULL,
-                        PRIMARY KEY (uuid, titleId, source)
-                    )
-                    """.trimIndent(),
-                )
-                statement.executeUpdate("PRAGMA user_version = $SCHEMA_VERSION")
-            } else if (version != SCHEMA_VERSION) {
+            if (version != 0 && version != SCHEMA_VERSION) {
                 val file = databasePath?.toString() ?: ":memory:"
                 throw StorageSchemaException(
                     "unsupported database schema version $version in $file " +
                         "(this build supports $SCHEMA_VERSION); refusing to load or modify the data. " +
                         "Restore a matching database backup or remove the file to start fresh.",
                 )
+            }
+            val expectedTables = listOf(
+                "player_state" to EXPECTED_PLAYER_STATE_COLUMNS,
+                "ownership" to EXPECTED_OWNERSHIP_COLUMNS,
+            )
+            // Verify every table that exists before creating anything, so a
+            // layout mismatch refuses without leaving new tables behind.
+            for ((table, expected) in expectedTables) {
+                if (tableExists(statement, table)) {
+                    verifyTableLayout(statement, table, expected)
+                }
+            }
+            // Then create whatever is missing (a database may hold only one
+            // of the two tables — audit #5: skipping creation here left the
+            // missing table absent forever while the version was stamped, so
+            // loadAll failed with no self-heal; audit #3: databases the old
+            // bug had already stamped as version 1 need the same recovery).
+            statement.executeUpdate(PLAYER_STATE_DDL)
+            statement.executeUpdate(OWNERSHIP_DDL)
+            if (version == 0) {
+                statement.executeUpdate("PRAGMA user_version = $SCHEMA_VERSION")
             }
         }
     }
@@ -219,6 +220,26 @@ class SqliteStorage(
 
     /** (column name, declared type, NOT NULL, position in the primary key; 0 = not part). */
     private data class ExpectedColumn(val name: String, val type: String, val notNull: Boolean, val pkPosition: Int)
+
+    private val PLAYER_STATE_DDL = """
+        CREATE TABLE IF NOT EXISTS player_state (
+            uuid TEXT PRIMARY KEY,
+            prefixes TEXT NOT NULL,
+            suffixes TEXT NOT NULL,
+            nickname TEXT NULL,
+            revision INTEGER NOT NULL
+        )
+    """.trimIndent()
+
+    private val OWNERSHIP_DDL = """
+        CREATE TABLE IF NOT EXISTS ownership (
+            uuid TEXT NOT NULL,
+            titleId TEXT NOT NULL,
+            source TEXT NOT NULL,
+            grantedAt INTEGER NOT NULL,
+            PRIMARY KEY (uuid, titleId, source)
+        )
+    """.trimIndent()
 
     private val EXPECTED_PLAYER_STATE_COLUMNS = listOf(
         ExpectedColumn("uuid", "TEXT", notNull = false, pkPosition = 1),
