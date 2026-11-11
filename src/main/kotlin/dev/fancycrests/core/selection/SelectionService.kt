@@ -49,6 +49,14 @@ enum class RejectionReason {
     NICKNAME_OCCUPIED,
     EVENT_CANCELLED,
     PLAYER_OFFLINE,
+
+    /**
+     * The operation body crashed before delivering its own completion
+     * (backend/listener/user-code exception caught by the queue guard). The
+     * player's state was not changed by this operation, so the caller may
+     * safely retry.
+     */
+    INTERNAL_ERROR,
 }
 
 /** Result of a selection/ownership operation. */
@@ -128,8 +136,19 @@ class SelectionService(
     }
 
     /** Per-player serial op queues (one in-flight op per player). */
-    private val queues = ConcurrentHashMap<UUID, ArrayDeque<(() -> Unit) -> Unit>>()
+    private val queues = ConcurrentHashMap<UUID, ArrayDeque<PendingOperation>>()
     private val inFlight = ConcurrentHashMap.newKeySet<UUID>()
+
+    /**
+     * One queued operation: its [body] plus the completion to deliver when
+     * the body crashes before signalling [body]'s own `done` — without
+     * [onCrash] the caller's callback would never run (audit #4: API
+     * futures and GUI debounces hung forever while the queue slot leaked).
+     */
+    private class PendingOperation(
+        val body: (() -> Unit) -> Unit,
+        val onCrash: (Throwable) -> Unit,
+    )
 
     // ----------------------------------------------------------------------
     // Read APIs (safe from any thread; returns immutable snapshots)
@@ -190,9 +209,23 @@ class SelectionService(
     // Equip / unequip
     // ----------------------------------------------------------------------
 
-    /** Appends [titleId] to the end of its slot list after full validation. */
-    fun equip(uuid: UUID, titleId: TitleId, reason: String, callback: (SelectionResult) -> Unit) {
-        submit(uuid) { done ->
+    /**
+     * Appends [titleId] to the end of its slot list after full validation.
+     *
+     * @param expectedSlot when non-null, the slot the caller believes the
+     *   title occupies (e.g. the menu tab it was clicked in). A mismatch
+     *   with the title's configured slot is rejected with
+     *   [RejectionReason.SLOT_MISMATCH] instead of silently equipping into
+     *   the other slot. Callers that pass nothing keep the old semantics.
+     */
+    fun equip(
+        uuid: UUID,
+        titleId: TitleId,
+        reason: String,
+        expectedSlot: TitleSlot? = null,
+        callback: (SelectionResult) -> Unit,
+    ) {
+        submit(uuid, crashCompletion(callback)) { done ->
             if (!canModifyEquipment(uuid)) {
                 callback(
                     SelectionResult.Rejected(
@@ -207,6 +240,16 @@ class SelectionService(
             val definition = catalog.get(titleId)
             if (definition == null) {
                 callback(SelectionResult.Rejected(RejectionReason.TITLE_NOT_FOUND, "unknown title '$titleId'"))
+                done()
+                return@submit
+            }
+            if (expectedSlot != null && expectedSlot != definition.slot) {
+                callback(
+                    SelectionResult.Rejected(
+                        RejectionReason.SLOT_MISMATCH,
+                        "'$titleId' belongs to the ${definition.slot} slot, not $expectedSlot",
+                    ),
+                )
                 done()
                 return@submit
             }
@@ -265,7 +308,7 @@ class SelectionService(
 
     /** Removes one or all titles of [slot], preserving the order of the rest. */
     fun unequip(uuid: UUID, slot: TitleSlot, target: UnequipTarget, reason: String, callback: (SelectionResult) -> Unit) {
-        submit(uuid) { done ->
+        submit(uuid, crashCompletion(callback)) { done ->
             if (!canModifyEquipment(uuid)) {
                 callback(
                     SelectionResult.Rejected(
@@ -328,7 +371,7 @@ class SelectionService(
 
     /** Sets the nickname ([text] non-null) or resets it (null). Display-only. */
     fun setNickname(uuid: UUID, text: String?, reason: String, callback: (SelectionResult) -> Unit) {
-        submit(uuid) { done ->
+        submit(uuid, crashCompletion(callback)) { done ->
             val current = stateOf(uuid)
             if (text == null) {
                 if (current.nickname == null) {
@@ -466,7 +509,7 @@ class SelectionService(
 
     /** Grants a title (source "local" for admin commands). */
     fun grant(uuid: UUID, titleId: TitleId, source: String, reason: String, callback: (SelectionResult) -> Unit) {
-        submit(uuid) { done ->
+        submit(uuid, crashCompletion(callback)) { done ->
             if (catalog.get(titleId) == null) {
                 callback(SelectionResult.Rejected(RejectionReason.TITLE_NOT_FOUND, "unknown title '$titleId'"))
                 done()
@@ -523,7 +566,7 @@ class SelectionService(
 
     /** Revokes an ownership grant and rechecks equipped titles afterwards. */
     fun revoke(uuid: UUID, titleId: TitleId, source: String, reason: String, callback: (SelectionResult) -> Unit) {
-        submit(uuid) { done ->
+        submit(uuid, crashCompletion(callback)) { done ->
             val operationId = eventBus.newOperationId()
             val current = stateOf(uuid)
             val candidateOwnership = ownershipOf(uuid)
@@ -592,7 +635,7 @@ class SelectionService(
             deferRevalidation(uuid, callback)
             return
         }
-        submit(uuid) { done ->
+        submit(uuid, crashCompletion(callback)) { done ->
             // Readiness is also re-checked at execution time: while this
             // operation waited in the queue, the backend data may have been
             // unloaded (audit #3), and executing anyway would again persist
@@ -765,11 +808,29 @@ class SelectionService(
     // Per-player serialization
     // ----------------------------------------------------------------------
 
-    private fun submit(uuid: UUID, body: (() -> Unit) -> Unit) {
+    /**
+     * Completion delivered when an operation body crashes before its own
+     * completion: the queue slot was released and the crash struck before
+     * anything was committed, so the state is unchanged and the caller may
+     * safely retry. Without it the caller's callback (API future, GUI
+     * debounce) would hang forever on a crashed operation (audit #4).
+     */
+    private fun crashCompletion(callback: (SelectionResult) -> Unit): (Throwable) -> Unit =
+        { t ->
+            callback(
+                SelectionResult.Rejected(
+                    RejectionReason.INTERNAL_ERROR,
+                    "operation crashed: ${t.message ?: t.javaClass.simpleName}",
+                ),
+            )
+        }
+
+    private fun submit(uuid: UUID, onCrash: (Throwable) -> Unit, body: (() -> Unit) -> Unit) {
+        val operation = PendingOperation(body, onCrash)
         val deque = queues.computeIfAbsent(uuid) { ArrayDeque() }
         val runNow = synchronized(deque) {
             if (inFlight.contains(uuid)) {
-                deque.addLast(body)
+                deque.addLast(operation)
                 false
             } else {
                 inFlight.add(uuid)
@@ -777,7 +838,7 @@ class SelectionService(
             }
         }
         if (runNow) {
-            runGuarded(uuid, body, completionFor(uuid))
+            runGuarded(uuid, operation, completionFor(uuid))
         }
     }
 
@@ -787,9 +848,11 @@ class SelectionService(
      * releases the player's queue slot instead of leaving [inFlight] set
      * forever, which would deadlock every future operation of that player.
      * The wrapped [done] is idempotent, so a body that throws after already
-     * scheduling its async completion cannot double-fire it.
+     * scheduling its async completion cannot double-fire it. After the slot
+     * is released the operation's crash completion runs, so the caller's
+     * callback (API future, GUI debounce) is always answered.
      */
-    private fun runGuarded(uuid: UUID, body: (() -> Unit) -> Unit, done: () -> Unit) {
+    private fun runGuarded(uuid: UUID, operation: PendingOperation, done: () -> Unit) {
         var signalled = false
         val once: () -> Unit = {
             if (!signalled) {
@@ -798,7 +861,7 @@ class SelectionService(
             }
         }
         try {
-            body(once)
+            operation.body(once)
         } catch (t: Throwable) {
             LOGGER.error(
                 "Selection operation for player {} crashed; releasing the queue slot",
@@ -806,6 +869,13 @@ class SelectionService(
                 t,
             )
             once()
+            try {
+                operation.onCrash(t)
+            } catch (t2: Throwable) {
+                // The crash completion itself must never take down the
+                // caller with a second exception.
+                LOGGER.error("Crash completion for player {} threw; caller callback lost", uuid, t2)
+            }
         }
     }
 
@@ -820,8 +890,7 @@ class SelectionService(
             if (next != null) {
                 // Keep running the queue inline; we are on the main thread.
                 runGuarded(uuid, next, completionFor(uuid))
-            }
-        } else {
+            }        } else {
             inFlight.remove(uuid)
         }
     }

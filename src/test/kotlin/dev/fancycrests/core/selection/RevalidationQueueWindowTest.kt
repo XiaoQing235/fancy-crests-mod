@@ -56,7 +56,10 @@ class RevalidationQueueWindowTest {
 
     private val backend = LazyBackend()
     private val config = TestFixtures.config(
-        titles = listOf(TestFixtures.title("guarded", TitleSlot.PREFIX, permission = "fancycrests.title.guarded")),
+        titles = listOf(
+            TestFixtures.title("guarded", TitleSlot.PREFIX, permission = "fancycrests.title.guarded"),
+            TestFixtures.title("plain", TitleSlot.SUFFIX),
+        ),
     )
     private lateinit var storage: SqliteStorage
     private lateinit var eventBus: TitleEventBus
@@ -112,7 +115,7 @@ class RevalidationQueueWindowTest {
         }
 
         val equipThread = Thread {
-            service.equip(uuid, TitleId("helper"), "test", callback = {})
+            service.equip(uuid, TitleId("plain"), "test", callback = {})
         }
         equipThread.isDaemon = true
         equipThread.start()

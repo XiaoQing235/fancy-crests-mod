@@ -94,7 +94,7 @@ class RevalidationDeferralTest {
     @Test
     fun `revalidation defers while a backend is not ready and keeps equipment`() {
         create()
-        await<SelectionResult> { cb -> service.equip(uuid, TitleId("guarded"), "test", cb) }
+        await<SelectionResult> { cb -> service.equip(uuid, TitleId("guarded"), "test", callback = cb) }
         assertEquals(listOf(TitleId("guarded")), service.stateOf(uuid).prefixes)
 
         backend.loaded = false
@@ -110,7 +110,7 @@ class RevalidationDeferralTest {
     @Test
     fun `revalidation resumes and applies real verdicts once ready`() {
         create()
-        await<SelectionResult> { cb -> service.equip(uuid, TitleId("guarded"), "test", cb) }
+        await<SelectionResult> { cb -> service.equip(uuid, TitleId("guarded"), "test", callback = cb) }
 
         backend.loaded = false
         await<SelectionResult> { cb -> service.revalidatePlayer(uuid, "login", cb) }

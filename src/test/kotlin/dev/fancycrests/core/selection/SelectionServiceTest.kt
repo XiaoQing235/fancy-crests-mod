@@ -89,7 +89,7 @@ class SelectionServiceTest {
     fun `a denied equip permission blocks the service itself`() {
         create(TestFixtures.config(deny = mapOf(uuid to listOf(Permissions.EQUIP))))
         val result = await<SelectionResult> { cb ->
-            service.equip(uuid, TitleId("vip"), "test", cb)
+            service.equip(uuid, TitleId("vip"), "test", callback = cb)
         }
         val rejected = result as SelectionResult.Rejected
         assertEquals(RejectionReason.MISSING_PERMISSION, rejected.reason)
@@ -99,7 +99,7 @@ class SelectionServiceTest {
     @Test
     fun `a denied equip permission blocks unequip as well`() {
         create(TestFixtures.config())
-        await<SelectionResult> { cb -> service.equip(uuid, TitleId("vip"), "test", cb) }
+        await<SelectionResult> { cb -> service.equip(uuid, TitleId("vip"), "test", callback = cb) }
         config = TestFixtures.config(deny = mapOf(uuid to listOf(Permissions.EQUIP)))
         builtIn.reload(config.permissions.nodes)
         assertEquals(listOf(TitleId("vip")), service.stateOf(uuid).prefixes)
@@ -123,7 +123,7 @@ class SelectionServiceTest {
     fun `lowering the equip limit trims existing equipment in equip order`() {
         create(TestFixtures.config(titles = prefixTitles, maxPrefixes = 3))
         for (id in listOf("alpha", "beta", "gamma")) {
-            await<SelectionResult> { cb -> service.equip(uuid, TitleId(id), "test", cb) }
+            await<SelectionResult> { cb -> service.equip(uuid, TitleId(id), "test", callback = cb) }
         }
         assertEquals(3, service.stateOf(uuid).prefixes.size)
 

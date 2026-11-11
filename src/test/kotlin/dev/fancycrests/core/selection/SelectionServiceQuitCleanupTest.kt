@@ -75,7 +75,7 @@ class SelectionServiceQuitCleanupTest {
     @Test
     fun `quit drops published views but keeps persisted state`() {
         val result = await<SelectionResult> { cb ->
-            service.equip(uuid, TitleId("vip"), "test", cb)
+            service.equip(uuid, TitleId("vip"), "test", callback = cb)
         }
         assertTrue(result is SelectionResult.Success)
         assertNotNull(publisher.latestView(uuid), "the view must exist while online")
@@ -91,11 +91,11 @@ class SelectionServiceQuitCleanupTest {
 
     @Test
     fun `operations after a rejoin still work`() {
-        await<SelectionResult> { cb -> service.equip(uuid, TitleId("vip"), "test", cb) }
+        await<SelectionResult> { cb -> service.equip(uuid, TitleId("vip"), "test", callback = cb) }
         service.handlePlayerQuit(uuid)
         // Rejoin: the queue is recreated on demand and publishes again.
         val result = await<SelectionResult> { cb ->
-            service.equip(uuid, TitleId("helper"), "test", cb)
+            service.equip(uuid, TitleId("helper"), "test", callback = cb)
         }
         assertTrue(result is SelectionResult.Success, "operations must work after rejoin, got $result")
         assertNotNull(publisher.latestView(uuid))

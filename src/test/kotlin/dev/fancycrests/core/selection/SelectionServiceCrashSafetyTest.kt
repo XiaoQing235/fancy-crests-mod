@@ -94,7 +94,7 @@ class SelectionServiceCrashSafetyTest {
         // must still be released, or this player could never operate again.
         service.equip(uuid, TitleId("vip"), "test") { _ -> throw IllegalStateException("callback boom") }
         val second = await<SelectionResult> { cb ->
-            service.equip(uuid, TitleId("helper"), "test", cb)
+            service.equip(uuid, TitleId("helper"), "test", callback = cb)
         }
         assertTrue(second is SelectionResult.Success, "queue must keep working, got $second")
         assertEquals(listOf(TitleId("vip")), service.stateOf(uuid).prefixes)
@@ -111,7 +111,7 @@ class SelectionServiceCrashSafetyTest {
         service.equip(uuid, TitleId("vip"), "test") { _ -> }
         flaky.throwFor = null
         val result = await<SelectionResult> { cb ->
-            service.equip(uuid, TitleId("vip"), "test", cb)
+            service.equip(uuid, TitleId("vip"), "test", callback = cb)
         }
         assertTrue(result is SelectionResult.Success, "queue must keep working, got $result")
         assertEquals(listOf(TitleId("vip")), service.stateOf(uuid).prefixes)
@@ -127,7 +127,7 @@ class SelectionServiceCrashSafetyTest {
             }
         }
         val result = await<SelectionResult> { cb ->
-            service.equip(uuid, TitleId("vip"), "test", cb)
+            service.equip(uuid, TitleId("vip"), "test", callback = cb)
         }
         assertTrue(result is SelectionResult.Success, "queue must keep working, got $result")
     }
