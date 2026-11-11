@@ -53,7 +53,20 @@ object PlayerFeedback {
     }
 
     @Volatile
-    private var attached = false
+    private var currentCore: CoreServices? = null
+
+    /**
+     * Bus instance the forwarders are attached to. Each CoreServices.start()
+     * builds a new event bus, so the forwarders must re-attach per server
+     * start; comparing bus identity makes [wire] idempotent within one bus
+     * lifetime no matter how often [attach] runs.
+     */
+    @Volatile
+    private var wiredBus: dev.fancycrests.core.event.TitleEventBus? = null
+
+    /** Guards the one-time Fabric-side SERVER_STARTED registration. */
+    @Volatile
+    private var lifecycleHookRegistered = false
 
     /** opId -> titles removed by that pending recheck. Internal for tests. */
     internal val pendingRecheckRemovals = ConcurrentHashMap<String, List<Pair<TitleId, dev.fancycrests.api.TitleSlot>>>()
@@ -61,23 +74,39 @@ object PlayerFeedback {
     /** Internal for tests. */
     internal val lastLoggedAt = ConcurrentHashMap<String, Long>()
 
+    /**
+     * Connects this bridge to [core]. Safe to call repeatedly.
+     *
+     * The Fabric-side [ServerLifecycleEvents.SERVER_STARTED] hook is
+     * registered exactly once per class load and forwards to whatever core
+     * the module-level holder currently references (a restart builds a new
+     * core-internal event bus; the old bus and its listeners are discarded
+     * together). Previously every attach on a not-yet-started core added
+     * another SERVER_STARTED listener, so Fabric-side listeners accumulated
+     * across restarts. The attach-on-a-started-core path is unchanged: the
+     * forwarders are wired immediately.
+     */
     fun attach(core: CoreServices) {
-        if (attached) return
-        attached = true
-
-        // Commands register during mod init, but the event bus only exists
-        // after CoreServices.start() on SERVER_STARTED; defer the wiring and
-        // rely on the integrator registering its start listener first.
+        currentCore = core
         if (core.isStarted) {
             wire(core)
-        } else {
-            ServerLifecycleEvents.SERVER_STARTED.register { wire(core) }
+        }
+        if (!lifecycleHookRegistered) {
+            lifecycleHookRegistered = true
+            ServerLifecycleEvents.SERVER_STARTED.register { currentCore?.let(::wire) }
         }
     }
 
     private fun wire(core: CoreServices) {
-        core.eventBus.addPreListener { event -> onPre(event) }
-        core.eventBus.addPostListener { event -> onPost(event, core) }
+        val bus = core.eventBus
+        if (wiredBus === bus) return
+        wiredBus = bus
+        bus.addPreListener { event -> onPre(event) }
+        bus.addPostListener { event ->
+            // Resolve the core at dispatch time (holder), not capture time,
+            // so a stale bus never forwards into a replaced core.
+            currentCore?.let { onPost(event, it) }
+        }
     }
 
     /** Internal for tests. */
