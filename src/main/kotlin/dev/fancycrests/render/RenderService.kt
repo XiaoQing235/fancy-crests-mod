@@ -37,6 +37,15 @@ import java.util.concurrent.atomic.AtomicLong
  * inside the synchronized transform path; every delayed/derived send is
  * guarded by the session stamp and per-connection world generation so stale
  * tasks become no-ops.
+ *
+ * Failed sends (audit leftover L1): every observer-side cache advances only
+ * after the packets were delivered, so a failed send leaves the cache at its
+ * pre-send value. That alone does *not* guarantee a retry: the publisher's
+ * `publishIfChanged` re-pushes only when the *resolved content* changes, so
+ * unchanged content after a failed send would never be re-driven. The
+ * bounded [pendingResends] set closes that gap: send-failure paths mark the
+ * (observer, target) pair and the end-tick sweep retries a bounded batch
+ * first, re-running the exact diff that previously failed.
  */
 internal class RenderService(initialSettings: RenderSettings) {
 
@@ -58,6 +67,24 @@ internal class RenderService(initialSettings: RenderSettings) {
     val connections = ConcurrentHashMap<ServerGamePacketListenerImpl, ConnectionRenderState>()
 
     val targets = ConcurrentHashMap<UUID, TargetRenderState>()
+
+    /**
+     * Bounded set of (observer, target) pairs whose last label-content send
+     * failed and therefore left the observer-side caches unsynchronized with
+     * the client (L1). Insertion-ordered and de-duplicated by
+     * [ResendQueuePolicy.admit]; retried (at most [ResendQueuePolicy.MAX_RESENDS_PER_TICK]
+     * per tick) at the head of [onEndTick], dropped when the observer
+     * disconnects ([onDisconnect]), the target is cleared ([clearTarget]) or
+     * the service stops.
+     *
+     * Relation to the publisher: `publishIfChanged` only pushes on *content*
+     * changes, so it cannot be relied upon to re-drive a failed send of
+     * unchanged content. This set is the render layer's own retry ladder:
+     * entries whose retry fails again are re-marked by the failing send path
+     * itself. Main-thread only (all marking sites run on events/tick/publish,
+     * all of which are main-thread).
+     */
+    private val pendingResends = LinkedHashSet<PendingResend>()
 
     private val transformer = OutboundTransformer(onObserverStateClosed = { targetUuid ->
         val target = targets[targetUuid] ?: return@OutboundTransformer
@@ -196,7 +223,7 @@ internal class RenderService(initialSettings: RenderSettings) {
      *
      * Fix: when a target state is first created, run [spawnLabels] for every
      * online observer allowed by [BackfillPolicy.backfillObservers]: same
-     * dimension, never the target itself, and — since audit #1 — *only*
+     * dimension, never the target itself, and 鈥?since audit #1 鈥?*only*
      * observers that already track the target on the vanilla tracking layer.
      * spawnLabels is idempotent for existing pairings (early-exit +
      * passenger re-merge only), so overlaps with tracking events that fire
@@ -206,19 +233,18 @@ internal class RenderService(initialSettings: RenderSettings) {
      * `ChunkMap.forEachEntityTrackedBy(ServerPlayer, Consumer<Entity>)` is
      * public and iterates the private `entityMap.values()`, accepting each
      * `TrackedEntity.entity` whose `seenBy` set contains
-     * `observer.connection` — the exact set `TrackedEntity.updatePlayer`/
+     * `observer.connection` 鈥?the exact set `TrackedEntity.updatePlayer`/
      * `removePlayer` maintain around `ServerEntity.addPairing`/
      * `removePairing` (seenBy.add precedes addPairing, seenBy.remove
      * precedes removePairing), i.e. precisely the window in which our
      * START/STOP_TRACKING handlers run. A backfilled pairing therefore has
      * a real tracking relation and receives its vanilla STOP when it ends.
      * Observers that do not (yet) track the target are skipped here and get
-     * labels through the normal START_TRACKING path when they enter range —
-     * an untracked target can no longer leave a label frozen at the backfill
+     * labels through the normal START_TRACKING path when they enter range 鈥?     * an untracked target can no longer leave a label frozen at the backfill
      * position (nothing drives position sync for entities a client does not
      * track). Using this public query also avoids accessor mixins into the
      * package-private `ChunkMap$TrackedEntity` (string-target mixin with
-     * erased return types — the version-fragile shape the audit feared).
+     * erased return types 鈥?the version-fragile shape the audit feared).
      */
     private fun backfillPairings(target: TargetRenderState, player: ServerPlayer) {
         if (!running) return
@@ -265,6 +291,7 @@ internal class RenderService(initialSettings: RenderSettings) {
 
     fun clearTarget(targetUuid: UUID) {
         if (!running) return
+        pendingResends.removeAll { it.targetUuid == targetUuid }
         val target = targets.remove(targetUuid) ?: return
         RenderDiagnostics.targets.decrementAndGet()
         val server = this.server
@@ -285,6 +312,7 @@ internal class RenderService(initialSettings: RenderSettings) {
         if (!running) return
         running = false
         RenderPackets.detach(this)
+        pendingResends.clear()
         val server = this.server
 
         // 1) Labels and mounts: real-passengers-only list first (only when
@@ -494,6 +522,7 @@ internal class RenderService(initialSettings: RenderSettings) {
     }
 
     private fun onDisconnect(listener: ServerGamePacketListenerImpl) {
+        pendingResends.removeAll { it.listener === listener }
         val state = connections.remove(listener) ?: return
         synchronized(state.lock) {
             // Connection closed: cancel pending work; no packets to a dead
@@ -512,6 +541,83 @@ internal class RenderService(initialSettings: RenderSettings) {
     // =================================================================
     // Tracking lifecycle
     // =================================================================
+
+    /**
+     * Marks an (observer, target) pair for a bounded end-tick retry after a
+     * failed send (L1). No-op when the pair is already pending (re-marks keep
+     * the original queue position) or the service is no longer running.
+     * Main thread only.
+     */
+    private fun markResendPending(listener: ServerGamePacketListenerImpl, targetUuid: UUID) {
+        if (!running) return
+        ResendQueuePolicy.admit(pendingResends, PendingResend(listener, targetUuid))
+    }
+
+    /**
+     * One end-tick retry of a pending (observer, target) pair. The retry
+     * re-runs the same diff logic as the normal push paths, which is
+     * idempotent: caches that were never advanced still mismatch, so exactly
+     * the missing packets are re-sent, and parts that *were* delivered
+     * compare equal and produce nothing.
+     *
+     *  - Observer state exists: re-push placement, content and second-line
+     *    diffs, then re-merge passengers when the mount cache is behind.
+     *  - Observer state was dropped by a failed spawn: the pair only had a
+     *    spawn attempted because a real tracking relation existed (tracking
+     *    start or verified backfill); re-spawn 鈥?but only after re-verifying
+     *    the relation, because a stop event that arrived in between must not
+     *    turn this retry into labels for an untracked entity.
+     *
+     * Transient conditions (target offline, entity id about to be refreshed
+     * by the poll sweep below) re-admit the entry instead of dropping it.
+     */
+    private fun retryPendingResend(server: MinecraftServer, pending: PendingResend) {
+        if (!running) return
+        val state = connections[pending.listener] ?: return
+        val target = targets[pending.targetUuid] ?: return
+        val player = server.playerList.getPlayer(pending.targetUuid)
+        if (player == null) {
+            // Offline target: keep the entry; the join/tracking path cleans
+            // or supersedes it (clearTarget drops it on logout).
+            ResendQueuePolicy.admit(pendingResends, pending)
+            return
+        }
+        if (target.currentEntityId != player.id) {
+            // The entity-id refresh in the poll sweep below will rebuild the
+            // allocation; retry afterwards.
+            ResendQueuePolicy.admit(pendingResends, pending)
+            return
+        }
+        synchronized(state.lock) {
+            val obs = state.targets[pending.targetUuid]
+            if (obs == null) {
+                val observer = pending.listener.player
+                if (observer.level() !== player.level()) return
+                val chunkMap = player.level().getChunkSource().chunkMap
+                if (!isTracking(chunkMap, observer, player.id)) {
+                    // Relation ended (a STOP event cleaned nothing because
+                    // the failed spawn never recorded state); spawning labels
+                    // for an untracked entity would freeze them client-side.
+                    return
+                }
+                spawnLabels(pending.listener, state, target, player)
+            } else {
+                if (obs.worldGeneration != state.worldGeneration) return
+                // Diff-based re-push: placement first (its caches only
+                // advance on success), then content/second-line state.
+                pushPlacement(pending.listener, obs)
+                pushSnapshotToObserver(pending.listener, state, target)
+                // Mount cache behind the real passengers: the merged-passenger
+                // send failed earlier; re-merge (idempotent client-side).
+                val realPassengers = player.passengers.map { it.id }
+                if (realPassengers != obs.lastRealPassengers) {
+                    if (sendMergedPassengers(pending.listener, obs, realPassengers)) {
+                        obs.lastRealPassengers = realPassengers
+                    }
+                }
+            }
+        }
+    }
 
     private fun onTrackingStart(targetPlayer: ServerPlayer?, observer: ServerPlayer) {
         if (targetPlayer == null || targetPlayer === observer) return
@@ -580,6 +686,22 @@ internal class RenderService(initialSettings: RenderSettings) {
             for (player in server.playerList.players) live.add(player.connection)
             for (listener in connections.keys.toList()) {
                 if (listener !in live) onDisconnect(listener)
+            }
+        }
+
+        // Pending content resends (audit leftover L1) run before everything
+        // else: a failed send left the observer cache behind the client, and
+        // unchanged content means no publish path will ever re-drive it. The
+        // batch is bounded per tick so a large dirty set cannot stall the
+        // tick; entries that could not be retried yet (target offline, entity
+        // id mid-refresh) are re-admitted and retried on a later tick.
+        if (pendingResends.isNotEmpty()) {
+            for (pending in ResendQueuePolicy.takeRetryBatch(pendingResends)) {
+                try {
+                    retryPendingResend(server, pending)
+                } catch (t: Exception) {
+                    RenderDiagnostics.recordError("pending resend", t)
+                }
             }
         }
 
@@ -845,6 +967,10 @@ internal class RenderService(initialSettings: RenderSettings) {
             RenderDiagnostics.recordError("label spawn", t)
             state.targets.remove(target.uuid)
             adjustRelation(target, -1)
+            // L1: no tracking event will re-fire for a still-tracked pair,
+            // so queue a retry (the retry re-verifies the relation before
+            // re-spawning).
+            markResendPending(listener, target.uuid)
             // The failure may have struck mid-list: some AddEntity packets
             // can already be on the wire while the metadata/mount never
             // arrived, which would leave raw text_display entities (default
@@ -916,6 +1042,9 @@ internal class RenderService(initialSettings: RenderSettings) {
             true
         } catch (t: Exception) {
             RenderDiagnostics.recordError("passenger remount", t)
+            // L1: the mount was not delivered; the caller's cache decision is
+            // based on this result, and a pending retry re-merges later.
+            markResendPending(listener, obs.targetUuid)
             false
         }
     }
@@ -943,14 +1072,20 @@ internal class RenderService(initialSettings: RenderSettings) {
 
     /**
      * Sends content (text/plate/opacity/flags) metadata for [layers] and
-     * advances the observer's content caches — but only for layers that were
+     * advances the observer's content caches 鈥?but only for layers that were
      * actually delivered (`id != 0`).
      *
      * The caches double as the presence signal of the second-line diff (see
      * [SecondLineDiff]): writing [ObserverTargetState.sentSecondLine] from a
      * first-line-only send would make a later diff believe a second-line
-     * entity exists on the client that was never spawned — or hide one that
+     * entity exists on the client that was never spawned 鈥?or hide one that
      * still needs removal.
+     *
+     * A failed send (L1) does not propagate: the exception is recorded, the
+     * layer caches stay at their pre-send values and the pair is queued for
+     * the bounded end-tick retry (unchanged content would otherwise never be
+     * re-published by `publishIfChanged`). Remaining layers of this call are
+     * skipped 鈥?they would race ahead of the failed one on the wire.
      */
     private fun sendContent(
         listener: ServerGamePacketListenerImpl,
@@ -967,10 +1102,16 @@ internal class RenderService(initialSettings: RenderSettings) {
                 LabelLayer.SECOND_LINE -> obs.secondLineId
             }
             if (id == 0) continue
-            sendPacket(
-                listener,
-                ClientboundSetEntityDataPacket(id, DisplayMetadata.contentValues(layer, target.snapshot, obs.sentSneaking)),
-            )
+            try {
+                sendPacket(
+                    listener,
+                    ClientboundSetEntityDataPacket(id, DisplayMetadata.contentValues(layer, target.snapshot, obs.sentSneaking)),
+                )
+            } catch (t: Exception) {
+                RenderDiagnostics.recordError("content update", t)
+                markResendPending(listener, obs.targetUuid)
+                break
+            }
             when (layer) {
                 LabelLayer.FIRST_FOREGROUND, LabelLayer.FIRST_BACKGROUND -> firstLineDelivered = true
                 LabelLayer.SECOND_LINE -> secondLineDelivered = true
@@ -1011,6 +1152,9 @@ internal class RenderService(initialSettings: RenderSettings) {
                 // next settings pass retries; never let one listener break
                 // the whole settings push loop.
                 RenderDiagnostics.recordError("placement push", t)
+                // L1: a settings pass is rare (reload only) 鈥?queue the
+                // bounded retry instead of waiting for the next one.
+                markResendPending(listener, obs.targetUuid)
                 return
             }
         }
@@ -1020,16 +1164,30 @@ internal class RenderService(initialSettings: RenderSettings) {
     }
 
     /**
-     * Pushes snapshot diffs to all observers currently holding labels.
+     * Pushes snapshot diffs to all observers currently holding labels; see
+     * [pushSnapshotToObserver] for the per-observer transition table.
+     */
+    private fun pushSnapshot(target: TargetRenderState) {
+        for ((listener, state) in connections) {
+            synchronized(state.lock) { pushSnapshotToObserver(listener, state, target) }
+        }
+    }
+
+    /**
+     * Per-observer half of [pushSnapshot]; also the retry body of the pending
+     * resend sweep (L1). Because the caches advance only on delivery,
+     * re-running this after a failed send re-sends exactly the missing
+     * packets, and delivered parts compare equal and produce nothing.
      *
      * Second-line lifecycle (batch E1): the per-observer transition is routed
      * by the pure table in [SecondLineDiff] over `(obs.sentSecondLine,
-     * target.snapshot.secondLine)`. That cache is the *presence* signal — it
+     * target.snapshot.secondLine)`. That cache is the *presence* signal 鈥?it
      * must satisfy `sentSecondLine != null <=> secondLineId != 0` (see
-     * [SecondLineDiff]) — so every branch advances the entity id and the cache
+     * [SecondLineDiff]) 鈥?so every branch advances the entity id and the cache
      * together, only after the packets were actually delivered. A failed send
-     * leaves the cache untouched, which makes the next publish retry the very
-     * same action instead of silently desynchronizing the client.
+     * leaves the cache untouched and queues the pair in the pending-resend
+     * set (L1): `publishIfChanged` cannot be relied on to retry, because it
+     * re-pushes only on *content* changes.
      *
      * Target-side slot (`target.labelIds.secondLineId`) is allocated on first
      * need (here or in [spawnLabels]) and freed by the first observer whose
@@ -1039,121 +1197,125 @@ internal class RenderService(initialSettings: RenderSettings) {
      * pre-existing entity of the same id (verified `ClientLevel.addEntity`),
      * so a reused id can never reference an entity any client deleted.
      */
-    private fun pushSnapshot(target: TargetRenderState) {
+    private fun pushSnapshotToObserver(
+        listener: ServerGamePacketListenerImpl,
+        state: ConnectionRenderState,
+        target: TargetRenderState,
+    ) {
         val settings = this.settings
-        for ((listener, state) in connections) {
-            synchronized(state.lock) {
-                val obs = state.targets[target.uuid] ?: return@synchronized
-                if (obs.worldGeneration != state.worldGeneration) return@synchronized
-                val firstChanged = obs.sentFirstLine != target.snapshot.firstLine
-                val secondBefore = obs.sentSecondLine
-                val secondNow = target.snapshot.secondLine
-                if (firstChanged) {
-                    sendContent(listener, obs, target, listOf(LabelLayer.FIRST_FOREGROUND, LabelLayer.FIRST_BACKGROUND))
+        val obs = state.targets[target.uuid] ?: return
+        if (obs.worldGeneration != state.worldGeneration) return
+        val firstChanged = obs.sentFirstLine != target.snapshot.firstLine
+        val secondBefore = obs.sentSecondLine
+        val secondNow = target.snapshot.secondLine
+        if (firstChanged) {
+            sendContent(listener, obs, target, listOf(LabelLayer.FIRST_FOREGROUND, LabelLayer.FIRST_BACKGROUND))
+        }
+        when (SecondLineDiff.actionOf(secondBefore, secondNow)) {
+            SecondLineAction.ADD -> {
+                // Spawn second-line entity, full metadata, then remount.
+                val player = server?.playerList?.getPlayer(target.uuid)
+                    ?: return // target offline; nothing to mount on
+                val level: ServerLevel = player.level()
+                if (target.labelIds.allocateSecondLine({ level.getNextEntityId() })) {
+                    RenderDiagnostics.virtualEntities.incrementAndGet()
                 }
-                when (SecondLineDiff.actionOf(secondBefore, secondNow)) {
-                    SecondLineAction.ADD -> {
-                        // Spawn second-line entity, full metadata, then remount.
-                        val player = server?.playerList?.getPlayer(target.uuid)
-                            ?: return@synchronized // target offline; nothing to mount on
-                        val level: ServerLevel = player.level()
-                        if (target.labelIds.allocateSecondLine({ level.getNextEntityId() })) {
-                            RenderDiagnostics.virtualEntities.incrementAndGet()
-                        }
-                        val position = player.position()
-                        try {
-                            sendPacket(
-                                listener,
-                                ClientboundAddEntityPacket(
-                                    target.labelIds.secondLineId,
-                                    target.labelIds.secondLineUuid,
-                                    position.x,
-                                    position.y,
-                                    position.z,
-                                    0f,
-                                    0f,
-                                    EntityTypes.TEXT_DISPLAY,
-                                    0,
-                                    Vec3.ZERO,
-                                    0.0,
-                                ),
-                            )
-                            RenderDiagnostics.entitiesSent.incrementAndGet()
-                            sendPacket(
-                                listener,
-                                ClientboundSetEntityDataPacket(
-                                    target.labelIds.secondLineId,
-                                    DisplayMetadata.fullValues(LabelLayer.SECOND_LINE, target.snapshot, target.sneaking, settings),
-                                ),
-                            )
-                            obs.secondLineId = target.labelIds.secondLineId
-                            obs.sentSecondLineOffset = settings.secondLineOffset
-                            val live = player.passengers.map { it.id }
-                            if (sendMergedPassengers(listener, obs, live)) {
-                                // Presence cache advances only after the whole
-                                // spawn *including the mount* was delivered; on
-                                // failure it stays null so the next publish
-                                // retries this branch (with the same slot id).
-                                obs.lastRealPassengers = live
-                                obs.sentSecondLine = secondNow
-                            } else {
-                                // Audit #6: the mount packet failed after the
-                                // AddEntity was already delivered. Without a
-                                // mount the second-line entity never follows
-                                // the player, so treat this exactly like a
-                                // send failure: roll the spawn back and keep
-                                // the presence cache at null for a retry.
-                                rollbackSecondLineSpawn(listener, target, obs)
-                            }
-                        } catch (t: Exception) {
-                            RenderDiagnostics.recordError("second line spawn", t)
-                            // The failure may have struck mid-sequence: an
-                            // AddEntity can already be on the wire with no
-                            // metadata/mount behind it. Best-effort removal
-                            // of the id; the slot stays allocated target-side
-                            // and the next publish re-spawns through this
-                            // branch with the same id.
-                            rollbackSecondLineSpawn(listener, target, obs)
-                        }
+                val position = player.position()
+                try {
+                    sendPacket(
+                        listener,
+                        ClientboundAddEntityPacket(
+                            target.labelIds.secondLineId,
+                            target.labelIds.secondLineUuid,
+                            position.x,
+                            position.y,
+                            position.z,
+                            0f,
+                            0f,
+                            EntityTypes.TEXT_DISPLAY,
+                            0,
+                            Vec3.ZERO,
+                            0.0,
+                        ),
+                    )
+                    RenderDiagnostics.entitiesSent.incrementAndGet()
+                    sendPacket(
+                        listener,
+                        ClientboundSetEntityDataPacket(
+                            target.labelIds.secondLineId,
+                            DisplayMetadata.fullValues(LabelLayer.SECOND_LINE, target.snapshot, target.sneaking, settings),
+                        ),
+                    )
+                    obs.secondLineId = target.labelIds.secondLineId
+                    obs.sentSecondLineOffset = settings.secondLineOffset
+                    val live = player.passengers.map { it.id }
+                    if (sendMergedPassengers(listener, obs, live)) {
+                        // Presence cache advances only after the whole
+                        // spawn *including the mount* was delivered; on
+                        // failure it stays null so the next publish
+                        // retries this branch (with the same slot id).
+                        obs.lastRealPassengers = live
+                        obs.sentSecondLine = secondNow
+                    } else {
+                        // Audit #6: the mount packet failed after the
+                        // AddEntity was already delivered. Without a
+                        // mount the second-line entity never follows the
+                        // player, so treat this exactly like a
+                        // send failure: roll the spawn back and keep the
+                        // presence cache at null for a retry.
+                        rollbackSecondLineSpawn(listener, target, obs)
+                        // L1: sendMergedPassengers already queued the retry.
                     }
-                    SecondLineAction.REMOVE -> {
-                        // Remove from passenger list first, then remove entity.
-                        val removed = obs.secondLineId
-                        try {
-                            obs.secondLineId = 0 // liveLabelIds() must exclude it for the remount below
-                            if (sendMergedPassengers(listener, obs, obs.lastRealPassengers)) {
-                                sendPacket(listener, ClientboundRemoveEntitiesPacket(removed))
-                                obs.sentSecondLine = null
-                                // The first observer whose removal drops the shared
-                                // slot also balances the virtualEntities gauge;
-                                // later observers see id 0 != removed and skip.
-                                if (target.labelIds.secondLineId == removed) {
-                                    target.labelIds.secondLineId = 0
-                                    RenderDiagnostics.virtualEntities.decrementAndGet()
-                                }
-                            } else {
-                                // Remount undelivered: keep the id handle and
-                                // the presence cache paired so the next publish
-                                // retries the removal instead of leaving a dead
-                                // passenger id inside the client's mount list.
-                                obs.secondLineId = removed
-                            }
-                        } catch (t: Exception) {
-                            RenderDiagnostics.recordError("second line removal", t)
-                            // Keep the id handle and the presence cache: the
-                            // removal may not have been delivered, and the
-                            // next publish must retry this branch rather than
-                            // lose the entity id. A retried RemoveEntities is
-                            // a client-side no-op when it did arrive.
-                            obs.secondLineId = removed
-                        }
-                    }
-                    SecondLineAction.UPDATE -> {
-                        sendContent(listener, obs, target, listOf(LabelLayer.SECOND_LINE))
-                    }
-                    SecondLineAction.NONE -> {}
+                } catch (t: Exception) {
+                    RenderDiagnostics.recordError("second line spawn", t)
+                    // The failure may have struck mid-sequence: an
+                    // AddEntity can already be on the wire with no
+                    // metadata/mount behind it. Best-effort removal
+                    // of the id; the slot stays allocated target-side
+                    // and the next publish re-spawns through this
+                    // branch with the same id.
+                    rollbackSecondLineSpawn(listener, target, obs)
+                    markResendPending(listener, target.uuid)
                 }
             }
+            SecondLineAction.REMOVE -> {
+                // Remove from passenger list first, then remove entity.
+                val removed = obs.secondLineId
+                try {
+                    obs.secondLineId = 0 // liveLabelIds() must exclude it for the remount below
+                    if (sendMergedPassengers(listener, obs, obs.lastRealPassengers)) {
+                        sendPacket(listener, ClientboundRemoveEntitiesPacket(removed))
+                        obs.sentSecondLine = null
+                        // The first observer whose removal drops the shared
+                        // slot also balances the virtualEntities gauge;
+                        // later observers see id 0 != removed and skip.
+                        if (target.labelIds.secondLineId == removed) {
+                            target.labelIds.secondLineId = 0
+                            RenderDiagnostics.virtualEntities.decrementAndGet()
+                        }
+                    } else {
+                        // Remount undelivered: keep the id handle and
+                        // the presence cache paired so the next publish
+                        // retries the removal instead of leaving a dead
+                        // passenger id inside the client's mount list.
+                        obs.secondLineId = removed
+                        // L1: sendMergedPassengers already queued the retry.
+                    }
+                } catch (t: Exception) {
+                    RenderDiagnostics.recordError("second line removal", t)
+                    // Keep the id handle and the presence cache: the
+                    // removal may not have been delivered, and the
+                    // next publish must retry this branch rather than
+                    // lose the entity id. A retried RemoveEntities is
+                    // a client-side no-op when it did arrive.
+                    obs.secondLineId = removed
+                    markResendPending(listener, target.uuid)
+                }
+            }
+            SecondLineAction.UPDATE -> {
+                sendContent(listener, obs, target, listOf(LabelLayer.SECOND_LINE))
+            }
+            SecondLineAction.NONE -> {}
         }
     }
 
