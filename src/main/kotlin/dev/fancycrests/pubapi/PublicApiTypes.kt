@@ -48,6 +48,12 @@ enum class ApiRejectionReason {
     EVENT_CANCELLED,
     PLAYER_OFFLINE,
     /**
+     * Configuration protection mode (no valid configuration could be
+     * loaded): every state-changing operation is refused. Recovery is
+     * administrative — fix the configuration and reload or restart.
+     */
+    CONFIG_PROTECTED,
+    /**
      * The operation body crashed before delivering its own completion (core
      * catch-all). The player's state was NOT changed by this operation, so
      * retrying the same call is safe.
