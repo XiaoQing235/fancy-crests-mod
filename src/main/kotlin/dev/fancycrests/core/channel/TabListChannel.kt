@@ -40,6 +40,34 @@ class TabListChannel(
         }
     }
 
+    /**
+     * Re-applies the override of every online player with a fresh resolve.
+     * Unlike [enable] — a deliberate no-op while already enabled — this
+     * refreshes the displayed text itself, so a config reload that changed
+     * title texts or the first-line template while the channel stayed
+     * enabled does not leave the whole tab list on stale text (audit #6b).
+     */
+    fun reapplyAll() {
+        if (!enabled) return
+        for (uuid in adapter.onlinePlayerUuids()) {
+            applyTo(uuid)
+        }
+    }
+
+    /**
+     * Re-broadcasts the current override of every tracked target. A newly
+     * joined observer built its tab list from vanilla state and missed every
+     * override broadcast that predates its join (audit #6a); applying only
+     * to the joiner would leave all *other* overridden players showing
+     * profile names on the new observer's client.
+     */
+    fun resyncOverridden() {
+        if (!enabled) return
+        for (uuid in overridden.toList()) {
+            applyTo(uuid)
+        }
+    }
+
     /** Disables the channel and restores every overridden entry. */
     fun disable() {
         if (!enabled) return

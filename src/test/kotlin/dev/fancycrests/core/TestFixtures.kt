@@ -26,6 +26,9 @@ object TestFixtures {
     /** Minimal [ServerAdapter] backed by mutable maps. */
     class FakeAdapter : ServerAdapter {
         val messages = mutableListOf<Pair<UUID, Component>>()
+
+        /** Every tab-list display-name broadcast, in order (null = restore). */
+        val tabBroadcasts = mutableListOf<Pair<UUID, Component?>>()
         var online: List<UUID> = emptyList()
         var knownNames: Map<String, UUID> = emptyMap()
         var operators: Map<UUID, Int> = emptyMap()
@@ -48,7 +51,9 @@ object TestFixtures {
             messages += uuid to message
         }
 
-        override fun broadcastTabListDisplayName(uuid: UUID, displayName: Component?) = Unit
+        override fun broadcastTabListDisplayName(uuid: UUID, displayName: Component?) {
+            tabBroadcasts += uuid to displayName
+        }
         override fun registerEndTickHandler(handler: () -> Unit): AutoCloseable = AutoCloseable {}
     }
 
