@@ -47,6 +47,10 @@ object FancyCrestsMod : ModInitializer {
         val services = CoreServices(loader.configDir, modVersion) { headChannel }
         core = services
 
+        // Render counters/errors surface through /fancycrests diagnose
+        // (empty while the channel is stopped - snapshot handles that).
+        services.renderDiagnosticsProvider = { headChannel.snapshot() }
+
         // Register the start listener BEFORE the command layer so that
         // CoreServices.start() runs before deferred attachers on the same
         // SERVER_STARTED event (they need the initialized event bus).
