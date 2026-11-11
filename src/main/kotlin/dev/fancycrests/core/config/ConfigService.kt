@@ -639,10 +639,74 @@ class ConfigService(
 
     internal class ConfigParseException(val errors: List<ConfigError>) : RuntimeException("config parse failed")
 
+    /**
+     * Known-key whitelists for every object layer (batch J2). Gson silently
+     * ignores unknown members, which turns typos into behaviour changes:
+     * `permisson` made a rule condition unconditional, `titels` produced an
+     * empty catalog (and, before last-good protection, permanent data loss).
+     * Every misspelling must be a load error with the exact path instead.
+     */
+    private object KnownKeys {
+        val ROOT = setOf(
+            "channels", "equipment", "nickname", "permissions",
+            "firstLineTemplate", "secondLineRules", "render", "titles",
+        )
+        val CHANNELS = setOf(
+            "headRender", "chat", "tabList", "placeholdersExport",
+            "headRenderTemplate", "chatTemplate", "tabListTemplate",
+        )
+        val EQUIPMENT = setOf("maxPrefixes", "maxSuffixes")
+        val NICKNAME = setOf("maxLength", "minLength", "pattern", "reservedNames", "allowSet")
+        val PERMISSIONS = setOf("nodes")
+        val NODE_GRANTS = setOf("allow", "deny")
+        val TEMPLATE_SEGMENT = setOf("type", "separator", "separatorStyle")
+        val CHANNEL_TEMPLATE_SEGMENT = setOf("type", "separator", "separatorStyle", "segmentSeparator")
+        val RULE = setOf("id", "priority", "condition", "template", "refreshTicks")
+        val CONDITION = setOf("dimension", "permission")
+        val RENDER = setOf("distanceBlocks", "firstLineOffset", "secondLineOffset")
+        val OFFSET = setOf("x", "y", "z")
+        val TITLE = setOf(
+            "id", "slot", "displayName", "text", "permission", "category", "iconItem", "sortOrder",
+        )
+    }
+
+    /**
+     * Reports every member outside [allowed] with its full JSON path and the
+     * list of legal field names, so the fix is obvious from the error alone.
+     * The root object uses an empty [path]; members there address as `key`.
+     */
+    private fun JsonObject.rejectUnknownKeys(path: String, allowed: Set<String>, errors: MutableList<ConfigError>) {
+        for (key in keySet()) {
+            if (key !in allowed) {
+                val where = if (path.isEmpty()) key else "$path.$key"
+                errors += ConfigError(
+                    where,
+                    "unknown field '$key' (allowed fields: ${allowed.sorted().joinToString(", ")})",
+                )
+            }
+        }
+    }
+
+    /**
+     * Required string member: absent (or explicit null) is an "is required"
+     * error — optional members silently default, but a missing required one
+     * used to degrade into a blank value that later stages had to catch.
+     */
+    private fun JsonObject.requiredString(member: String, path: String, errors: MutableList<ConfigError>): String? {
+        val element = get(member)
+        if (element == null || element.isJsonNull) {
+            errors += ConfigError(path, "is required")
+            return null
+        }
+        return string(member, null, path, errors)
+    }
+
     fun parseConfig(root: JsonObject): FancyCrestsConfig {
         val errors = mutableListOf<ConfigError>()
+        root.rejectUnknownKeys("", KnownKeys.ROOT, errors)
 
         val channelsObj = root.optObject("channels", "channels", errors)
+        channelsObj.rejectUnknownKeys("channels", KnownKeys.CHANNELS, errors)
         val channels = ChannelsConfig(
             headRender = channelsObj.boolean("headRender", true, "channels.headRender", errors),
             chat = channelsObj.boolean("chat", false, "channels.chat", errors),
@@ -662,12 +726,14 @@ class ConfigService(
         )
 
         val equipmentObj = root.optObject("equipment", "equipment", errors)
+        equipmentObj.rejectUnknownKeys("equipment", KnownKeys.EQUIPMENT, errors)
         val equipment = EquipmentConfig(
             maxPrefixes = equipmentObj.strictInt("maxPrefixes", 3, "equipment.maxPrefixes", errors),
             maxSuffixes = equipmentObj.strictInt("maxSuffixes", 3, "equipment.maxSuffixes", errors),
         )
 
         val nicknameObj = root.optObject("nickname", "nickname", errors)
+        nicknameObj.rejectUnknownKeys("nickname", KnownKeys.NICKNAME, errors)
         val patternText = nicknameObj.string("pattern", "[A-Za-z0-9_]+", "nickname.pattern", errors)
         val pattern = try {
             Pattern.compile(patternText)
@@ -684,6 +750,7 @@ class ConfigService(
         )
 
         val permissionsObj = root.optObject("permissions", "permissions", errors)
+        permissionsObj.rejectUnknownKeys("permissions", KnownKeys.PERMISSIONS, errors)
         val nodesObj = permissionsObj.optObject("nodes", "permissions.nodes", errors)
         val nodes = LinkedHashMap<UUID, NodeGrants>()
         for ((key, value) in nodesObj.entrySet()) {
@@ -698,9 +765,11 @@ class ConfigService(
                 errors += ConfigError(path, "must be an object with allow/deny arrays")
                 continue
             }
+            val grantsObj = value.asJsonObject
+            grantsObj.rejectUnknownKeys(path, KnownKeys.NODE_GRANTS, errors)
             nodes[uuid] = NodeGrants(
-                allow = value.asJsonObject.stringList("allow", "$path.allow", errors),
-                deny = value.asJsonObject.stringList("deny", "$path.deny", errors),
+                allow = grantsObj.stringList("allow", "$path.allow", errors),
+                deny = grantsObj.stringList("deny", "$path.deny", errors),
             )
         }
 
@@ -713,6 +782,7 @@ class ConfigService(
                 continue
             }
             val obj = element.asJsonObject
+            obj.rejectUnknownKeys(path, KnownKeys.TEMPLATE_SEGMENT, errors)
             val type = segmentType(obj, path, errors)
             if (type != null) {
                 template += TemplateSegment(
@@ -732,7 +802,9 @@ class ConfigService(
                 continue
             }
             val obj = element.asJsonObject
+            obj.rejectUnknownKeys(path, KnownKeys.RULE, errors)
             val conditionObj = obj.optObject("condition", "$path.condition", errors)
+            conditionObj.rejectUnknownKeys("$path.condition", KnownKeys.CONDITION, errors)
             val condition = SecondLineCondition(
                 dimension = conditionObj.string("dimension", null, "$path.condition.dimension", errors)
                     ?.takeIf { it.isNotBlank() },
@@ -740,10 +812,10 @@ class ConfigService(
                     ?.takeIf { it.isNotBlank() },
             )
             rules += SecondLineRuleConfig(
-                id = obj.string("id", "", "$path.id", errors) ?: "",
+                id = obj.requiredString("id", "$path.id", errors) ?: "",
                 priority = obj.strictInt("priority", 0, "$path.priority", errors),
                 condition = condition,
-                template = obj.string("template", "", "$path.template", errors) ?: "",
+                template = obj.requiredString("template", "$path.template", errors) ?: "",
                 refreshTicks = obj.strictInt(
                     member = "refreshTicks",
                     default = SecondLineRuleConfig.DEFAULT_REFRESH_TICKS,
@@ -756,6 +828,7 @@ class ConfigService(
         }
 
         val renderObj = root.optObject("render", "render", errors)
+        renderObj.rejectUnknownKeys("render", KnownKeys.RENDER, errors)
         val render = RenderConfig(
             distanceBlocks = renderObj.double("distanceBlocks", 48.0, "render.distanceBlocks", errors),
             firstLineOffset = renderObj.optObject("firstLineOffset", "render.firstLineOffset", errors)
@@ -773,6 +846,7 @@ class ConfigService(
                 continue
             }
             val obj = element.asJsonObject
+            obj.rejectUnknownKeys(path, KnownKeys.TITLE, errors)
             val slotText = obj.string("slot", null, "$path.slot", errors)
             val slot = when (slotText?.lowercase()?.trim()) {
                 "prefix" -> TitleSlot.PREFIX
@@ -791,10 +865,10 @@ class ConfigService(
             }
             if (slot != null) {
                 titles += TitleConfig(
-                    id = obj.string("id", "", "$path.id", errors) ?: "",
+                    id = obj.requiredString("id", "$path.id", errors) ?: "",
                     slot = slot,
-                    displayName = obj.string("displayName", "", "$path.displayName", errors) ?: "",
-                    text = obj.string("text", "", "$path.text", errors) ?: "",
+                    displayName = obj.requiredString("displayName", "$path.displayName", errors) ?: "",
+                    text = obj.requiredString("text", "$path.text", errors) ?: "",
                     permission = obj.string("permission", null, "$path.permission", errors)?.takeIf { it.isNotBlank() },
                     category = obj.string("category", null, "$path.category", errors)?.takeIf { it.isNotBlank() },
                     iconItem = obj.string("iconItem", null, "$path.iconItem", errors)?.takeIf { it.isNotBlank() },
@@ -863,6 +937,7 @@ class ConfigService(
                 continue
             }
             val obj = entry.asJsonObject
+            obj.rejectUnknownKeys(entryPath, KnownKeys.CHANNEL_TEMPLATE_SEGMENT, errors)
             val type = segmentType(obj, entryPath, errors)
             if (type != null) {
                 segments += TemplateSegmentConfig(
@@ -960,6 +1035,7 @@ class ConfigService(
     }
 
     private fun JsonObject.toOffset(path: String, errors: MutableList<ConfigError>): OffsetConfig? {
+        rejectUnknownKeys(path, KnownKeys.OFFSET, errors)
         if (get("x") == null && get("y") == null && get("z") == null) return null
         return OffsetConfig(
             x = double("x", 0.0, "$path.x", errors),
