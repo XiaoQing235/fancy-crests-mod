@@ -109,19 +109,33 @@ commands but not player-only ones.
 
 ## Configuration
 
-`config/fancycrests.json` is validated on load; an invalid file leaves the previous
-configuration active and reports the offending JSON paths.
+`config/fancycrests.json` is validated on load and every problem is reported with
+its exact JSON path. Unknown or misspelled fields are **errors**, not silently
+ignored members (`permisson`, `titels` and a segment without `type` used to change
+behaviour quietly). A failed **reload** keeps the previous configuration active.
+A failed **startup** load falls back to the last-known-good copy
+(`fancycrests.json.last-good`, rewritten after every successful full validation);
+if neither copy is usable the server enters **protection mode**: title state
+changes are refused and saved equipment is never unequipped against an unknown
+catalog, so a bad edit cannot wipe existing choices. Fix the file and restart or
+`/fancycrests reload` to leave protection.
 
 | Section | Purpose |
 | --- | --- |
-| `channels` | Independent switches: `headRender`, `chat`, `tabList`, `placeholdersExport` |
-| `equipment` | `maxPrefixes` / `maxSuffixes` per player |
-| `nickname` | `maxLength`, `minLength`, `pattern`, `reservedNames`, `allowSet` |
+| `channels` | Independent switches: `headRender`, `chat`, `tabList`, `placeholdersExport`; optional `headRenderTemplate` / `chatTemplate` / `tabListTemplate` override the global first line per channel (absent = inherit the global template, `[]` = that channel has no first line) |
+| `equipment` | `maxPrefixes` / `maxSuffixes` per player (0–10; `0` disables the slot) |
+| `nickname` | `maxLength` / `minLength` (1–64), `pattern`, `reservedNames`, `allowSet` |
 | `permissions.nodes` | Built-in backend: per-UUID `allow` / `deny` lists (trailing `.*` wildcards supported) |
 | `firstLineTemplate` | Ordered segments of type `prefixes` / `name` / `suffixes`, each with `separator` and optional `separatorStyle` |
-| `secondLineRules` | `id`, `priority`, `condition` (`dimension` / `permission`), `template`, `refreshTicks` (1–72000, default 20) |
-| `render` | `distanceBlocks` and the first/second line offsets |
-| `titles` | `id`, `slot` (`prefix`/`suffix`), `displayName`, `text` (`&` codes), `permission`, `category`, `iconItem`, `sortOrder` |
+| `secondLineRules` | `id`, `priority` (0–1000), `condition` (`dimension` / `permission`), `template`, `refreshTicks` (1–72000, default 20) |
+| `render` | `distanceBlocks` (8–128) and the first/second line offsets |
+| `titles` | `id`, `slot` (`prefix`/`suffix`), `displayName`, `text` (`&` codes), `permission`, `category`, `iconItem`, `sortOrder` (0–10000) |
+
+Numeric fields are parsed exactly from the JSON text: `3.0` is accepted as the
+same integer, while `3.9`, `1e5` and values outside the field's range are errors
+with the exact path. A condition `dimension` without a namespace means the
+vanilla namespace (`overworld` → `minecraft:overworld`); nicknames may not start
+or end with whitespace.
 
 Titles with a `permission` are only equippable by players who own them locally or
 whose active permission backend allows the node.
