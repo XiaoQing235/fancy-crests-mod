@@ -433,6 +433,8 @@ object FancyCrestsCommands {
             RejectionReason.NICKNAME_OCCUPIED -> "Nickname occupies another player's name${detail}"
             RejectionReason.EVENT_CANCELLED -> "Cancelled by an event listener${detail}"
             RejectionReason.PLAYER_OFFLINE -> "Player offline${detail}"
+            RejectionReason.INTERNAL_ERROR ->
+                "Internal error, nothing was changed; you can try again${detail}"
         }
     }
 }
