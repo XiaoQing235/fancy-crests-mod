@@ -202,6 +202,10 @@ class CoreServices(
             catalog = catalogService,
             permissions = permissionManager,
             configProvider = { configService.current },
+            // Protection mode: no valid config could be loaded, so every
+            // state change is refused and revalidation defers instead of
+            // unequipping equipment against the empty default catalog.
+            configHealthy = { !configService.protectionActive },
             eventBus = eventBus,
             publisher = snapshotPublisher,
             initialStates = loaded.states,
