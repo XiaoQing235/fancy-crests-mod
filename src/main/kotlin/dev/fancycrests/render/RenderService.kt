@@ -765,12 +765,25 @@ internal class RenderService(initialSettings: RenderSettings) {
         }
     }
 
+    /**
+     * Sends content (text/plate/opacity/flags) metadata for [layers] and
+     * advances the observer's content caches — but only for layers that were
+     * actually delivered (`id != 0`).
+     *
+     * The caches double as the presence signal of the second-line diff (see
+     * [SecondLineDiff]): writing [ObserverTargetState.sentSecondLine] from a
+     * first-line-only send would make a later diff believe a second-line
+     * entity exists on the client that was never spawned — or hide one that
+     * still needs removal.
+     */
     private fun sendContent(
         listener: ServerGamePacketListenerImpl,
         obs: ObserverTargetState,
         target: TargetRenderState,
         layers: List<LabelLayer>,
     ) {
+        var firstLineDelivered = false
+        var secondLineDelivered = false
         for (layer in layers) {
             val id = when (layer) {
                 LabelLayer.FIRST_FOREGROUND -> obs.foregroundId
@@ -782,9 +795,13 @@ internal class RenderService(initialSettings: RenderSettings) {
                 listener,
                 ClientboundSetEntityDataPacket(id, DisplayMetadata.contentValues(layer, target.snapshot, obs.sentSneaking)),
             )
+            when (layer) {
+                LabelLayer.FIRST_FOREGROUND, LabelLayer.FIRST_BACKGROUND -> firstLineDelivered = true
+                LabelLayer.SECOND_LINE -> secondLineDelivered = true
+            }
         }
-        obs.sentFirstLine = target.snapshot.firstLine
-        obs.sentSecondLine = target.snapshot.secondLine
+        if (firstLineDelivered) obs.sentFirstLine = target.snapshot.firstLine
+        if (secondLineDelivered) obs.sentSecondLine = target.snapshot.secondLine
     }
 
     private fun pushPlacement(
@@ -826,7 +843,26 @@ internal class RenderService(initialSettings: RenderSettings) {
         obs.sentViewRangeBlocks = settings.renderDistance.blocks
     }
 
-    /** Pushes snapshot diffs to all observers currently holding labels. */
+    /**
+     * Pushes snapshot diffs to all observers currently holding labels.
+     *
+     * Second-line lifecycle (batch E1): the per-observer transition is routed
+     * by the pure table in [SecondLineDiff] over `(obs.sentSecondLine,
+     * target.snapshot.secondLine)`. That cache is the *presence* signal — it
+     * must satisfy `sentSecondLine != null <=> secondLineId != 0` (see
+     * [SecondLineDiff]) — so every branch advances the entity id and the cache
+     * together, only after the packets were actually delivered. A failed send
+     * leaves the cache untouched, which makes the next publish retry the very
+     * same action instead of silently desynchronizing the client.
+     *
+     * Target-side slot (`target.labelIds.secondLineId`) is allocated on first
+     * need (here or in [spawnLabels]) and freed by the first observer whose
+     * removal drops it, balancing the `virtualEntities` gauge exactly once
+     * per allocation. Reusing a still-allocated slot id is intentional: the
+     * ADD branch always sends a fresh AddEntity, and the client replaces a
+     * pre-existing entity of the same id (verified `ClientLevel.addEntity`),
+     * so a reused id can never reference an entity any client deleted.
+     */
     private fun pushSnapshot(target: TargetRenderState) {
         val settings = this.settings
         for ((listener, state) in connections) {
@@ -839,8 +875,8 @@ internal class RenderService(initialSettings: RenderSettings) {
                 if (firstChanged) {
                     sendContent(listener, obs, target, listOf(LabelLayer.FIRST_FOREGROUND, LabelLayer.FIRST_BACKGROUND))
                 }
-                when {
-                    secondBefore == null && secondNow != null -> {
+                when (SecondLineDiff.actionOf(secondBefore, secondNow)) {
+                    SecondLineAction.ADD -> {
                         // Spawn second-line entity, full metadata, then remount.
                         val player = server?.playerList?.getPlayer(target.uuid)
                             ?: return@synchronized // target offline; nothing to mount on
@@ -866,6 +902,7 @@ internal class RenderService(initialSettings: RenderSettings) {
                                     0.0,
                                 ),
                             )
+                            RenderDiagnostics.entitiesSent.incrementAndGet()
                             sendPacket(
                                 listener,
                                 ClientboundSetEntityDataPacket(
@@ -878,29 +915,60 @@ internal class RenderService(initialSettings: RenderSettings) {
                             val live = player.passengers.map { it.id }
                             obs.lastRealPassengers = live
                             sendMergedPassengers(listener, obs, live)
+                            // Presence cache advances only after the whole
+                            // spawn was delivered; on failure it stays null
+                            // so the next publish retries this branch (with
+                            // the same slot id).
+                            obs.sentSecondLine = secondNow
                         } catch (t: Exception) {
                             RenderDiagnostics.recordError("second line spawn", t)
                             obs.secondLineId = 0
+                            // The failure may have struck mid-sequence: an
+                            // AddEntity can already be on the wire with no
+                            // metadata/mount behind it. Best-effort removal
+                            // of the id (client-side no-op when the add never
+                            // arrived, verified removeEntity); the slot stays
+                            // allocated target-side and the next publish
+                            // re-spawns through this branch with the same id.
+                            try {
+                                sendPacket(
+                                    listener,
+                                    ClientboundRemoveEntitiesPacket(target.labelIds.secondLineId),
+                                )
+                            } catch (t2: Exception) {
+                                RenderDiagnostics.recordError("second line spawn rollback", t2)
+                            }
                         }
                     }
-                    secondBefore != null && secondNow == null -> {
+                    SecondLineAction.REMOVE -> {
                         // Remove from passenger list first, then remove entity.
+                        val removed = obs.secondLineId
                         try {
-                            val removed = obs.secondLineId
-                            obs.secondLineId = 0
+                            obs.secondLineId = 0 // liveLabelIds() must exclude it for the remount below
                             sendMergedPassengers(listener, obs, obs.lastRealPassengers)
                             sendPacket(listener, ClientboundRemoveEntitiesPacket(removed))
+                            obs.sentSecondLine = null
+                            // The first observer whose removal drops the shared
+                            // slot also balances the virtualEntities gauge;
+                            // later observers see id 0 != removed and skip.
                             if (target.labelIds.secondLineId == removed) {
                                 target.labelIds.secondLineId = 0
+                                RenderDiagnostics.virtualEntities.decrementAndGet()
                             }
                         } catch (t: Exception) {
                             RenderDiagnostics.recordError("second line removal", t)
+                            // Keep the id handle and the presence cache: the
+                            // removal may not have been delivered, and the
+                            // next publish must retry this branch rather than
+                            // lose the entity id. A retried RemoveEntities is
+                            // a client-side no-op when it did arrive.
+                            obs.secondLineId = removed
                         }
                     }
-                    secondBefore != secondNow -> {
+                    SecondLineAction.UPDATE -> {
                         sendContent(listener, obs, target, listOf(LabelLayer.SECOND_LINE))
                     }
-                    else -> {}
+                    SecondLineAction.NONE -> {}
                 }
             }
         }
