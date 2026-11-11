@@ -214,6 +214,7 @@ class CoreServices(
             resolver = snapshotResolver,
             stateOf = { uuid -> stateOfPlayer(uuid) },
             eventBus = eventBus,
+            publisher = snapshotPublisher,
         )
 
         // ---- head channel ---------------------------------------------
