@@ -137,6 +137,13 @@ sealed interface Eligibility {
 private const val RAW_NICKNAME_LENGTH_FACTOR = 4
 private const val RAW_NICKNAME_LENGTH_HEADROOM = 8
 
+/**
+ * Absolute ceiling for the raw nickname cap (batch J3). Without it a future
+ * `maxLength` change could push the product past Int bounds; the cap keeps
+ * the computed limit safe regardless of what the configuration says.
+ */
+private const val RAW_NICKNAME_LENGTH_CAP = 512
+
 private val LOGGER: Logger = LoggerFactory.getLogger("FancyCrests/Selection")
 
 class SelectionService(
@@ -489,6 +496,15 @@ class SelectionService(
      * visible characters and cannot bypass the length cap or the pattern.
      */
     internal fun validateNickname(uuid: UUID, text: String, config: FancyCrestsConfig): SelectionResult.Rejected? {
+        // Raw-input gate (batch J3): the stored and rendered value is the raw
+        // text, so leading/trailing whitespace would be stored invisibly.
+        // Trimming it silently would change what the player asked for.
+        if (text != text.trim()) {
+            return SelectionResult.Rejected(
+                RejectionReason.NICKNAME_PATTERN,
+                "leading or trailing whitespace is not allowed",
+            )
+        }
         val normalized = LegacyTextParser.strip(text, knownCodesOnly = true).trim()
         val bypassReserved =
             permissions.check(uuid, Permissions.NICKNAME_BYPASS_RESERVED) == PermissionVerdict.ALLOW
@@ -503,7 +519,10 @@ class SelectionService(
                 "control characters, line breaks or bidirectional overrides are not allowed",
             )
         }
-        val rawLimit = config.nickname.maxLength * RAW_NICKNAME_LENGTH_FACTOR + RAW_NICKNAME_LENGTH_HEADROOM
+        val rawLimit = (config.nickname.maxLength.toLong() * RAW_NICKNAME_LENGTH_FACTOR +
+            RAW_NICKNAME_LENGTH_HEADROOM)
+            .coerceAtMost(RAW_NICKNAME_LENGTH_CAP.toLong())
+            .toInt()
         if (text.length > rawLimit) {
             return SelectionResult.Rejected(
                 RejectionReason.NICKNAME_TOO_LONG,

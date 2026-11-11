@@ -81,6 +81,13 @@ object TestFixtures {
         maxSuffixes: Int = 3,
         allow: Map<UUID, List<String>> = emptyMap(),
         deny: Map<UUID, List<String>> = emptyMap(),
+        nickname: NicknameConfig = NicknameConfig(
+            maxLength = 16,
+            minLength = 3,
+            pattern = Pattern.compile("[A-Za-z0-9_]+"),
+            reservedNames = listOf("server"),
+            allowSet = true,
+        ),
     ): FancyCrestsConfig = FancyCrestsConfig(
         channels = ChannelsConfig(
             headRender = false,
@@ -89,13 +96,7 @@ object TestFixtures {
             placeholdersExport = false,
         ),
         equipment = EquipmentConfig(maxPrefixes, maxSuffixes),
-        nickname = NicknameConfig(
-            maxLength = 16,
-            minLength = 3,
-            pattern = Pattern.compile("[A-Za-z0-9_]+"),
-            reservedNames = listOf("server"),
-            allowSet = true,
-        ),
+        nickname = nickname,
         permissions = PermissionsConfig(
             nodes = (allow.keys + deny.keys).associateWith { uuid ->
                 NodeGrants(allow[uuid] ?: emptyList(), deny[uuid] ?: emptyList())
