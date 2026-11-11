@@ -79,16 +79,23 @@ object RenderDiagnostics {
         }
     }
 
-    /** Point-in-time snapshot for diagnostics commands. */
-    fun snapshot(): Map<String, Long> = linkedMapOf(
-        "targets" to targets.get().toLong(),
-        "virtualEntities" to virtualEntities.get().toLong(),
-        "trackingRelations" to trackingRelations.get().toLong(),
-        "virtualTeams" to virtualTeams.get().toLong(),
-        "entitiesSent" to entitiesSent.get(),
-        "bundlesProcessed" to bundlesProcessed.get(),
-        "teamPacketsRewritten" to teamPacketsRewritten.get(),
-        "teamPacketsDropped" to teamPacketsDropped.get(),
-        "passengerPacketsRewritten" to passengerPacketsRewritten.get(),
+    /**
+     * Point-in-time snapshot for diagnostics commands (e.g. the
+     * `/fancycrests diagnose` render section fed through the integration
+     * layer's provider). All values are stringified — including the newest
+     * error ("none" when the pipeline has never recorded one) — so the map
+     * can be merged into the other channels' text diagnostics unchanged.
+     */
+    fun snapshot(): Map<String, String> = linkedMapOf(
+        "targets" to targets.get().toString(),
+        "virtualEntities" to virtualEntities.get().toString(),
+        "trackingRelations" to trackingRelations.get().toString(),
+        "virtualTeams" to virtualTeams.get().toString(),
+        "entitiesSent" to entitiesSent.get().toString(),
+        "bundlesProcessed" to bundlesProcessed.get().toString(),
+        "teamPacketsRewritten" to teamPacketsRewritten.get().toString(),
+        "teamPacketsDropped" to teamPacketsDropped.get().toString(),
+        "passengerPacketsRewritten" to passengerPacketsRewritten.get().toString(),
+        "lastError" to (lastError ?: "none"),
     )
 }

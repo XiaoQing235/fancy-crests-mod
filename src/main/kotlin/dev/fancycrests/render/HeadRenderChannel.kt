@@ -51,4 +51,24 @@ class HeadRenderChannel : HeadDisplayChannel {
             current.stop()
         }
     }
+
+    /**
+     * Read-only diagnostics snapshot of the head render channel for the
+     * integration layer (`CoreServices.renderDiagnosticsProvider` →
+     * `/fancycrests diagnose`): whether a service instance is attached, how
+     * many connections it holds, plus every [RenderDiagnostics] counter and
+     * the most recent pipeline error, all stringified.
+     *
+     * Deliberately declared on the implementation class only — the frozen
+     * [HeadDisplayChannel] api contract stays untouched. Safe from any
+     * thread; values are point-in-time.
+     */
+    fun snapshot(): Map<String, String> {
+        val current = service
+        return buildMap {
+            put("running", (current != null).toString())
+            put("connections", current?.connections?.size?.toString() ?: "0")
+            putAll(RenderDiagnostics.snapshot())
+        }
+    }
 }
