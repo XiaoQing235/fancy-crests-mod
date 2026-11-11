@@ -589,16 +589,19 @@ class SelectionService(
         // unequip: defer entirely and let the backend's own readiness event
         // (load completion) drive the recheck, by which time isReady is true.
         if (!permissions.isReady(uuid)) {
-            // Deferred revalidation never consults explicitVerdict, so the
-            // lazy user load it would have triggered must be started here;
-            // the backend's load-completion event then drives the real
-            // recheck once readiness flips.
-            permissions.warmUp(uuid)
-            val revision = stateOf(uuid).revision
-            callback(SelectionResult.Success("deferred", revision, revision))
+            deferRevalidation(uuid, callback)
             return
         }
         submit(uuid) { done ->
+            // Readiness is also re-checked at execution time: while this
+            // operation waited in the queue, the backend data may have been
+            // unloaded (audit #3), and executing anyway would again persist
+            // an unequip on interim UNDEFINED verdicts.
+            if (!permissions.isReady(uuid)) {
+                deferRevalidation(uuid, callback)
+                done()
+                return@submit
+            }
             val current = stateOf(uuid)
             val config = configProvider()
             // Two independent filters, in one pass so the persisted order is
@@ -643,6 +646,20 @@ class SelectionService(
                 done = done,
             )
         }
+    }
+
+    /**
+     * Defers a revalidation whose backend is not ready: starts the lazy user
+     * load and reports success without touching any state. The backend's own
+     * load-completion event then drives the real recheck once readiness
+     * flips.
+     */
+    private fun deferRevalidation(uuid: UUID, callback: (SelectionResult) -> Unit) {
+        // Deferred revalidation never consults explicitVerdict, so the lazy
+        // user load it would have triggered must be started here.
+        permissions.warmUp(uuid)
+        val revision = stateOf(uuid).revision
+        callback(SelectionResult.Success("deferred", revision, revision))
     }
 
     /** Revalidates every online player (config reload, backend switch). */
