@@ -163,40 +163,43 @@ class SqliteStorage(
         connection.createStatement().use { statement ->
             val version = queryUserVersion(statement)
             if (version == 0) {
-                val playerStateExists = tableExists(statement, "player_state")
-                val ownershipExists = tableExists(statement, "ownership")
-                if (playerStateExists || ownershipExists) {
-                    // Pre-versioning database. CREATE TABLE IF NOT EXISTS would
-                    // silently accept any incompatible layout and then stamp
-                    // it as this schema version; verify the layout first and
-                    // refuse (without touching any data) on mismatch.
-                    if (playerStateExists) verifyTableLayout(statement, "player_state", EXPECTED_PLAYER_STATE_COLUMNS)
-                    if (ownershipExists) verifyTableLayout(statement, "ownership", EXPECTED_OWNERSHIP_COLUMNS)
-                } else {
-                    // Fresh database: create the tables.
-                    statement.executeUpdate(
-                        """
-                        CREATE TABLE IF NOT EXISTS player_state (
-                            uuid TEXT PRIMARY KEY,
-                            prefixes TEXT NOT NULL,
-                            suffixes TEXT NOT NULL,
-                            nickname TEXT NULL,
-                            revision INTEGER NOT NULL
-                        )
-                        """.trimIndent(),
-                    )
-                    statement.executeUpdate(
-                        """
-                        CREATE TABLE IF NOT EXISTS ownership (
-                            uuid TEXT NOT NULL,
-                            titleId TEXT NOT NULL,
-                            source TEXT NOT NULL,
-                            grantedAt INTEGER NOT NULL,
-                            PRIMARY KEY (uuid, titleId, source)
-                        )
-                        """.trimIndent(),
-                    )
+                // Pre-versioning database: CREATE TABLE IF NOT EXISTS would
+                // silently accept any incompatible layout and then stamp it
+                // as this schema version; verify the layout of every table
+                // that already exists and refuse (without touching any data)
+                // on mismatch.
+                if (tableExists(statement, "player_state")) {
+                    verifyTableLayout(statement, "player_state", EXPECTED_PLAYER_STATE_COLUMNS)
                 }
+                if (tableExists(statement, "ownership")) {
+                    verifyTableLayout(statement, "ownership", EXPECTED_OWNERSHIP_COLUMNS)
+                }
+                // Then create whatever is missing (a v0 database may hold
+                // only one of the two tables — audit #5: skipping creation
+                // here left the missing table absent forever while the
+                // version was stamped, so loadAll failed with no self-heal).
+                statement.executeUpdate(
+                    """
+                    CREATE TABLE IF NOT EXISTS player_state (
+                        uuid TEXT PRIMARY KEY,
+                        prefixes TEXT NOT NULL,
+                        suffixes TEXT NOT NULL,
+                        nickname TEXT NULL,
+                        revision INTEGER NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                statement.executeUpdate(
+                    """
+                    CREATE TABLE IF NOT EXISTS ownership (
+                        uuid TEXT NOT NULL,
+                        titleId TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        grantedAt INTEGER NOT NULL,
+                        PRIMARY KEY (uuid, titleId, source)
+                    )
+                    """.trimIndent(),
+                )
                 statement.executeUpdate("PRAGMA user_version = $SCHEMA_VERSION")
             } else if (version != SCHEMA_VERSION) {
                 val file = databasePath?.toString() ?: ":memory:"
