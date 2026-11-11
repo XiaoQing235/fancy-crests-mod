@@ -11,9 +11,13 @@ import java.util.UUID
  *
  * The constructor performs no runtime access; the integration layer may
  * instantiate it during mod init. [start] attaches the service to the global
- * send hook and registers the lifecycle handlers; [stop] runs the ordered
- * teardown (labels/mounts -> virtual teams -> source restore). Restart after
- * stop re-initialises from the then-current state.
+ * send hook and publishes it to the module-level Fabric event forwarder
+ * ([RenderServiceEvents] registers the lifecycle handlers exactly once per
+ * process and forwards to the active instance — audit II-5); [stop] runs the
+ * ordered teardown (labels/mounts -> virtual teams -> source restore) and
+ * clears the forwarder slot. Restart after stop re-initialises from the
+ * then-current state; each start creates a fresh [RenderService] as before,
+ * only the Fabric registration is no longer per-instance.
  */
 class HeadRenderChannel : HeadDisplayChannel {
 

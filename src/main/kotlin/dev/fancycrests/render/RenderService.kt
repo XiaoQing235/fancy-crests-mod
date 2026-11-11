@@ -3,11 +3,6 @@ package dev.fancycrests.render
 import dev.fancycrests.api.DisplaySnapshot
 import dev.fancycrests.api.RenderSettings
 import dev.fancycrests.mixin.ServerCommonPacketListenerImplAccessor
-import net.fabricmc.fabric.api.entity.event.v1.ServerEntityLevelChangeEvents
-import net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents
-import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents
-import net.fabricmc.fabric.api.networking.v1.EntityTrackingEvents
-import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents
 import net.minecraft.network.protocol.game.ClientboundAddEntityPacket
 import net.minecraft.network.protocol.game.ClientboundBundlePacket
 import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket
@@ -32,6 +27,10 @@ import java.util.concurrent.atomic.AtomicLong
  *  - lifecycle coverage: join/leave, tracking start/stop, respawn, level
  *    change, world generations, tick polling for sneak state and real
  *    passenger changes, settings hot reload, ordered stop.
+ *
+ * Fabric events are registered exactly once per process in
+ * [RenderServiceEvents] (audit II-5) and forwarded to the active instance;
+ * this class holds no Fabric registrations of its own.
  *
  * All state mutations happen on the server main thread (events, tick) or
  * inside the synchronized transform path; every delayed/derived send is
@@ -99,57 +98,42 @@ internal class RenderService(initialSettings: RenderSettings) {
         }
     })
 
-    private var handlersRegistered = false
-
     // =================================================================
     // Lifecycle
     // =================================================================
 
+    /**
+     * Publishes this service as the receiver of the module-level Fabric
+     * event forwarders ([RenderServiceEvents]); the handlers themselves are
+     * registered exactly once per process there, not per instance (audit
+     * II-5).
+     */
     fun start() {
-        registerHandlers()
+        RenderServiceEvents.activate(this)
     }
 
-    private fun registerHandlers() {
-        if (handlersRegistered) return
-        handlersRegistered = true
-
-        EntityTrackingEvents.START_TRACKING.register { entity, player ->
-            if (isCurrent()) onTrackingStart(entity as? ServerPlayer, player)
-        }
-        EntityTrackingEvents.STOP_TRACKING.register { entity, player ->
-            if (isCurrent()) onTrackingStop(entity as? ServerPlayer, player)
-        }
-        ServerPlayConnectionEvents.JOIN.register { handler, _, server ->
-            if (isCurrent()) {
-                ensureServer(server)
-                attachConnection(handler, flushInit = true)
-            }
-        }
-        ServerPlayConnectionEvents.DISCONNECT.register { handler, _ ->
-            if (isCurrent()) onDisconnect(handler)
-        }
-        ServerPlayerEvents.AFTER_RESPAWN.register { oldPlayer, newPlayer, _ ->
-            if (isCurrent()) {
-                // Both sides of the same respawn: the respawned player is
-                // an observer whose client rebuilt its world view, and (as
-                // a target) keeps its entity id (respawn preserves it), so
-                // only the allocation sweep runs for it.
-                onObserverClientWorldReset(newPlayer)
-                onTargetEntityReplaced(oldPlayer)
-            }
-        }
-        ServerEntityLevelChangeEvents.AFTER_PLAYER_CHANGE_LEVEL.register { player, _, _ ->
-            if (isCurrent()) onTargetEntityReplaced(player)
-        }
-        ServerTickEvents.END_SERVER_TICK.register { server ->
-            if (isCurrent()) {
-                ensureServer(server)
-                onEndTick(server)
-            }
-        }
+    /** Join forwarder: bind the server and attach (or refresh) the connection. */
+    internal fun onPlayConnectionJoin(
+        listener: net.minecraft.server.network.ServerGamePacketListenerImpl,
+        server: MinecraftServer,
+    ) {
+        if (!running) return
+        ensureServer(server)
+        attachConnection(listener, flushInit = true)
     }
 
-    private fun isCurrent(): Boolean = running && RenderPackets.active === this
+    /** Disconnect forwarder. */
+    internal fun onPlayConnectionDisconnect(listener: net.minecraft.server.network.ServerGamePacketListenerImpl) {
+        if (!running) return
+        onDisconnect(listener)
+    }
+
+    /** End-tick forwarder: bind the server and run the tick sweep. */
+    internal fun onServerTick(server: MinecraftServer) {
+        if (!running) return
+        ensureServer(server)
+        onEndTick(server)
+    }
 
     private fun ensureServer(server: MinecraftServer) {
         if (this.server == null) this.server = server
@@ -311,6 +295,7 @@ internal class RenderService(initialSettings: RenderSettings) {
     fun stop() {
         if (!running) return
         running = false
+        RenderServiceEvents.deactivate(this)
         RenderPackets.detach(this)
         pendingResends.clear()
         val server = this.server
@@ -619,7 +604,7 @@ internal class RenderService(initialSettings: RenderSettings) {
         }
     }
 
-    private fun onTrackingStart(targetPlayer: ServerPlayer?, observer: ServerPlayer) {
+    internal fun onTrackingStart(targetPlayer: ServerPlayer?, observer: ServerPlayer) {
         if (targetPlayer == null || targetPlayer === observer) return
         val state = connections[observer.connection] ?: return
         val target = targets[targetPlayer.uuid] ?: return
@@ -632,7 +617,7 @@ internal class RenderService(initialSettings: RenderSettings) {
         }
     }
 
-    private fun onTrackingStop(targetPlayer: ServerPlayer?, observer: ServerPlayer) {
+    internal fun onTrackingStop(targetPlayer: ServerPlayer?, observer: ServerPlayer) {
         if (targetPlayer == null || targetPlayer === observer) return
         val state = connections[observer.connection] ?: return
         val target = targets[targetPlayer.uuid] ?: return
@@ -648,7 +633,7 @@ internal class RenderService(initialSettings: RenderSettings) {
         }
     }
 
-    private fun onTargetEntityReplaced(player: ServerPlayer) {        val target = targets[player.uuid] ?: return
+    internal fun onTargetEntityReplaced(player: ServerPlayer) {        val target = targets[player.uuid] ?: return
         if (target.currentEntityId == player.id) return
         // Respawn / dimension change of the target: old entity id (and any
         // labels bound to it) are invalid. Observer states were cleaned by
@@ -667,7 +652,7 @@ internal class RenderService(initialSettings: RenderSettings) {
         target.lastRealPassengers = emptyList()
     }
 
-    private fun onEndTick(server: MinecraftServer) {
+    internal fun onEndTick(server: MinecraftServer) {
         // Attach any connection we have not seen yet (covers channel start
         // with existing connections).
         for (player in server.playerList.players) {
@@ -816,7 +801,7 @@ internal class RenderService(initialSettings: RenderSettings) {
      * Subsequent START_TRACKING events (vanilla re-registers the new player
      * object with every TrackedEntity) then take the full spawnLabels path.
      */
-    private fun onObserverClientWorldReset(player: ServerPlayer) {
+    internal fun onObserverClientWorldReset(player: ServerPlayer) {
         val state = connections[player.connection] ?: return
         val server = this.server ?: return
         synchronized(state.lock) {
