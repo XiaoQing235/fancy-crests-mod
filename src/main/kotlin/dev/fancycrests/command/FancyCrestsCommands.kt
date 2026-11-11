@@ -10,6 +10,7 @@ import dev.fancycrests.api.Permissions
 import dev.fancycrests.api.TitleId
 import dev.fancycrests.api.TitleSlot
 import dev.fancycrests.core.CoreServices
+import dev.fancycrests.core.InvalidNicknameEntry
 import dev.fancycrests.core.config.ConfigLoadResult
 import dev.fancycrests.core.selection.RejectionReason
 import dev.fancycrests.core.selection.SelectionResult
@@ -445,9 +446,44 @@ object FancyCrestsCommands {
                 "Storage: DISABLED — ${info.storageError ?: "unknown error"}"
             },
         )
-        source.success("Renderer internals: owned by the render module (placeholder read point).")
+        for (line in nicknameViolationLines(info.invalidNicknames)) {
+            source.success(line)
+        }
+        source.success(renderDiagnosticsLine(info.renderDiagnostics))
         return Command.SINGLE_SUCCESS
     }
+
+    // ----------------------------------------------------------------------
+    // Diagnose formatting (pure, unit-tested)
+    // ----------------------------------------------------------------------
+
+    /**
+     * Lines for the nickname-policy section of /diagnose. Design decision:
+     * invalid stored nicknames are KEPT on display and only listed here and
+     * in the admin log — the copy must never claim they were reset.
+     * Internal for tests.
+     */
+    internal fun nicknameViolationLines(entries: List<InvalidNicknameEntry>): List<String> =
+        if (entries.isEmpty()) {
+            listOf("Invalid nicknames (kept, admin action required): none")
+        } else {
+            listOf("Invalid nicknames (kept, admin action required): ${entries.size}") +
+                entries.map { entry ->
+                    "  - ${entry.profileName ?: entry.uuid}: nickname='${entry.nickname}' (${entry.reason})"
+                }
+        }
+
+    /**
+     * One line summarizing the render-module counters. An empty map means
+     * the render module reported nothing (idle or absent) and replaces the
+     * former placeholder text. Internal for tests.
+     */
+    internal fun renderDiagnosticsLine(render: Map<String, String>): String =
+        if (render.isEmpty()) {
+            "Renderer internals: render module idle or absent"
+        } else {
+            "Renderer internals: " + render.entries.joinToString(", ") { "${it.key}=${it.value}" }
+        }
 
     // ----------------------------------------------------------------------
     // Shared result reporting
@@ -484,6 +520,9 @@ object FancyCrestsCommands {
             RejectionReason.NICKNAME_OCCUPIED -> "Nickname occupies another player's name${detail}"
             RejectionReason.EVENT_CANCELLED -> "Cancelled by an event listener${detail}"
             RejectionReason.PLAYER_OFFLINE -> "Player offline${detail}"
+            RejectionReason.CONFIG_PROTECTED ->
+                "Configuration protection mode is active (no valid configuration could be loaded); " +
+                    "all state changes are refused until the configuration is fixed and reloaded${detail}"
             RejectionReason.INTERNAL_ERROR ->
                 "Internal error, nothing was changed; you can try again${detail}"
         }
