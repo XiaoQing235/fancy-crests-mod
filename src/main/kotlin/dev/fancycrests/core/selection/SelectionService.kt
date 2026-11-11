@@ -442,9 +442,13 @@ class SelectionService(
      * names and other known players' real names (case-insensitive; the
      * bypass permission skips reserved/occupied). The identity key (UUID)
      * is never touched.
+     *
+     * The normalized text strips only *known* code pairs — matching what
+     * [LegacyTextParser.parse] renders — so unknown pairs count as two
+     * visible characters and cannot bypass the length cap or the pattern.
      */
     internal fun validateNickname(uuid: UUID, text: String, config: FancyCrestsConfig): SelectionResult.Rejected? {
-        val normalized = LegacyTextParser.strip(text).trim()
+        val normalized = LegacyTextParser.strip(text, knownCodesOnly = true).trim()
         val bypassReserved =
             permissions.check(uuid, Permissions.NICKNAME_BYPASS_RESERVED) == PermissionVerdict.ALLOW
 

@@ -129,4 +129,20 @@ class NicknameValidationTest {
         val bidi = nickname("&cser&\u202Ever")
         assertEquals(RejectionReason.NICKNAME_PATTERN, (bidi as SelectionResult.Rejected).reason)
     }
+
+    @Test
+    fun `unknown code pairs count as visible characters`() {
+        create()
+        // Old bug: validation collapsed the unknown "&z" pair away
+        // ("Bo&zb" → "Bob", 3 chars, pattern-clean) while rendering shows
+        // all five characters, bypassing both the length cap and the
+        // pattern.
+        val result = nickname("Bo&zb")
+        assertEquals(RejectionReason.NICKNAME_PATTERN, (result as SelectionResult.Rejected).reason)
+
+        // Known codes still collapse: the visible text is "CatNine".
+        val ok = nickname("&6CatNine")
+        assertTrue(ok is SelectionResult.Success, "known codes must still strip for validation, got $ok")
+        assertEquals("&6CatNine", service.stateOf(uuid).nickname)
+    }
 }

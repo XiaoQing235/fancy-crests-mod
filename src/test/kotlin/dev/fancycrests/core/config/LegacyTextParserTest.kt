@@ -58,6 +58,28 @@ class LegacyTextParserTest {
     }
 
     @Test
+    fun `known-codes-only strip keeps unknown pairs as visible characters`() {
+        // Audit #5: an unknown pair renders literally (parse emits both
+        // characters), so the known-codes-only mode must keep it too — the
+        // default mode collapses "Bo&zb" to "Bob" and let nicknames bypass
+        // length and pattern checks.
+        assertEquals("Bo&zb", LegacyTextParser.strip("Bo&zb", knownCodesOnly = true))
+        assertEquals("Bob", LegacyTextParser.strip("Bo&zb"))
+        assertEquals("Tom &zJ", LegacyTextParser.strip("Tom &zJ", knownCodesOnly = true))
+        assertEquals("Tom J", LegacyTextParser.strip("Tom &zJ"))
+        // Known pairs still collapse in both modes, with either prefix and
+        // either case.
+        assertEquals("Bob", LegacyTextParser.strip("&6Bob", knownCodesOnly = true))
+        assertEquals("ab", LegacyTextParser.strip("a&Fb", knownCodesOnly = true))
+        assertEquals("ab", LegacyTextParser.strip("a&rb", knownCodesOnly = true))
+        assertEquals("xy", LegacyTextParser.strip("x§7y", knownCodesOnly = true))
+        assertEquals("CatNine", LegacyTextParser.strip("&cCat&lNine", knownCodesOnly = true))
+        // Escapes and lone prefixes behave as in the default mode.
+        assertEquals("Bob&D", LegacyTextParser.strip("Bob&&D", knownCodesOnly = true))
+        assertEquals("abc&", LegacyTextParser.strip("abc&", knownCodesOnly = true))
+    }
+
+    @Test
     fun `containsLegacyCodes detects both prefixes`() {
         assertTrue(LegacyTextParser.containsLegacyCodes("&6Gold"))
         assertTrue(LegacyTextParser.containsLegacyCodes("§6Gold"))

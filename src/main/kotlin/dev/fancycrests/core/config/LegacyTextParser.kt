@@ -130,27 +130,56 @@ object LegacyTextParser {
     }
 
     /**
-     * Removes all colour/format code pairs (either prefix) from [input] so
-     * the result reflects the visible text. Doubled prefixes collapse into
-     * a single literal prefix character. A lone trailing prefix is kept.
+     * Removes colour/format code pairs (either prefix) from [input] so the
+     * result reflects the visible text. Doubled prefixes collapse into a
+     * single literal prefix character. A lone trailing prefix is kept.
+     *
+     * Two modes:
+     *  - default (`knownCodesOnly = false`): every `&X` / `§X` pair is
+     *    removed, whatever X is. Config validation relies on this
+     *    aggressive form to treat text made of arbitrary pairs as blank.
+     *  - `knownCodesOnly = true`: only pairs with a known code (colours
+     *    0-9a-f, decorations k-o, reset r — either case, either prefix) are
+     *    removed, i.e. exactly the pairs [parse] consumes. Unknown pairs
+     *    remain as the two literal characters they render as, so length and
+     *    pattern checks see what players actually see: "Bo&zb" keeps its
+     *    unknown pair instead of collapsing to "Bob". Nickname validation
+     *    uses this mode.
      */
-    fun strip(input: String): String {
+    fun strip(input: String, knownCodesOnly: Boolean = false): String {
         if (!containsLegacyCodes(input)) return input
         val sb = StringBuilder(input.length)
         var index = 0
         while (index < input.length) {
             val c = input[index]
             if (isPrefix(c) && index + 1 < input.length) {
-                if (input[index + 1] == c) {
-                    sb.append(c)
+                when {
+                    input[index + 1] == c -> {
+                        // Doubled prefix: escaped literal prefix character.
+                        sb.append(c)
+                        index += 2
+                    }
+                    knownCodesOnly && !isKnownCode(input[index + 1]) -> {
+                        // Unknown pair: parse renders it literally, so the
+                        // visible text keeps both characters.
+                        sb.append(c)
+                        sb.append(input[index + 1])
+                        index += 2
+                    }
+                    else -> index += 2
                 }
-                index += 2
             } else {
                 sb.append(c)
                 index += 1
             }
         }
         return sb.toString()
+    }
+
+    /** True when [code] (either case) is one of the codes [parse] consumes. */
+    private fun isKnownCode(code: Char): Boolean {
+        val lower = code.lowercaseChar()
+        return lower == 'r' || colors.containsKey(lower) || decorations.containsKey(lower)
     }
 
     /** True when [input] contains a `&` or `§` prefix character. */
