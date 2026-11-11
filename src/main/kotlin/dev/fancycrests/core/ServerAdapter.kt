@@ -81,10 +81,39 @@ interface ServerAdapter {
 
     /**
      * Registers a callback executed at the end of every server tick. The
-     * returned handle deactivates the callback when closed (fabric events
-     * cannot unregister, so the registration stays but becomes a noop).
+     * returned handle removes the callback again when closed: the Fabric
+     * event itself is hooked exactly once per process by [EndTickHandlerHub]
+     * (audit II-5), so closing a handle neither leaks the handler closure
+     * nor leaves a deactivated registration behind.
      */
     fun registerEndTickHandler(handler: () -> Unit): AutoCloseable
+}
+
+/**
+ * Module-level END_SERVER_TICK registration (audit II-5): Fabric events
+ * cannot unregister, so a per-call registration accumulated one handler per
+ * [ServerAdapter.registerEndTickHandler] call across server start/stop
+ * cycles. This hub hooks the event exactly once (on first use) and fans out
+ * to the currently live handlers; closing a handle removes it from the fan-
+ * out list for real.
+ *
+ * Handlers run on the server main thread; the copy-on-write list only
+ * tolerates the rare registration/removal during service start/stop.
+ */
+private object EndTickHandlerHub {
+
+    private val handlers = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
+
+    init {
+        net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents.END_SERVER_TICK.register { _ ->
+            for (handler in handlers) handler()
+        }
+    }
+
+    fun add(handler: () -> Unit): AutoCloseable {
+        handlers.add(handler)
+        return AutoCloseable { handlers.remove(handler) }
+    }
 }
 
 /**
@@ -179,11 +208,5 @@ class MinecraftServerAdapter(private val server: net.minecraft.server.MinecraftS
         }
     }
 
-    override fun registerEndTickHandler(handler: () -> Unit): AutoCloseable {
-        val active = java.util.concurrent.atomic.AtomicBoolean(true)
-        net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents.END_SERVER_TICK.register { _ ->
-            if (active.get()) handler()
-        }
-        return AutoCloseable { active.set(false) }
-    }
+    override fun registerEndTickHandler(handler: () -> Unit): AutoCloseable = EndTickHandlerHub.add(handler)
 }

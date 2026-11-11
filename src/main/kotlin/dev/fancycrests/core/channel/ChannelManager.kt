@@ -8,7 +8,6 @@ import dev.fancycrests.core.resolve.SnapshotPublisher
 import dev.fancycrests.core.resolve.SnapshotResolver
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
-import net.fabricmc.fabric.api.entity.event.v1.ServerEntityLevelChangeEvents
 import net.minecraft.network.chat.Component
 
 /**
@@ -40,7 +39,7 @@ class ChannelManager(
     private val chat = ChatChannel(::freshFirstLine)
     private val tab = TabListChannel(adapter, ::freshFirstLine)
 
-    /** Deactivates the fabric dimension hook after [stop]; fabric events cannot unregister. */
+    /** Deactivates the forwarded dimension hook after [stop] (audit II-5). */
     private val active = AtomicBoolean(true)
 
     init {
@@ -49,11 +48,12 @@ class ChannelManager(
         eventBus.addPostListener { event -> onPostEvent(event) }
         // Dimension conditions of second-line rules must be re-evaluated for
         // the mover (audit #7): re-resolve and publish only real changes
-        // (publishIfChanged), never a bare publish. The handler follows the
-        // RenderService pattern: guarded by [active], a no-op after stop().
-        ServerEntityLevelChangeEvents.AFTER_PLAYER_CHANGE_LEVEL.register { player, _, _ ->
-            if (active.get()) onPlayerChangedDimension(player.uuid)
-        }    }
+        // (publishIfChanged), never a bare publish. The Fabric registration
+        // lives in the module-level forwarder (audit II-5): registered once
+        // per process, forwarded to the active manager; a no-op after
+        // stop() cleared the slot.
+        activateChannelManager(this)
+    }
 
     /** Applies the channel switches of [config]; idempotent. Main thread. */
     fun apply(config: dev.fancycrests.core.config.FancyCrestsConfig) {
@@ -103,6 +103,7 @@ class ChannelManager(
     /** Tears both channels down and restores vanilla behaviour. */
     fun stop() {
         active.set(false)
+        deactivateChannelManager(this)
         chat.disable()
         tab.disable()
     }

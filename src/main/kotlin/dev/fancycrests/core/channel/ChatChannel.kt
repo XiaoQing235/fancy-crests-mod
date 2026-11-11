@@ -1,9 +1,10 @@
 package dev.fancycrests.core.channel
 
 import java.util.UUID
-import net.fabricmc.fabric.api.message.v1.ServerMessageEvents
 import net.minecraft.network.chat.ChatType
 import net.minecraft.network.chat.Component
+import net.minecraft.network.chat.PlayerChatMessage
+import net.minecraft.server.level.ServerPlayer
 
 /**
  * Chat channel: decorates the *sender display name* of player chat with the
@@ -22,9 +23,11 @@ import net.minecraft.network.chat.Component
  * public record and `PlayerList.broadcastChatMessage(message, sender, bound)`
  * is public, so no mixin is needed.
  *
- * The hook is registered once; while disabled it passes every message through
- * unchanged ("通道关闭完全不挂钩子"). A re-entrancy guard stops our own
- * re-broadcast from firing the hook again.
+ * The allow hook is registered exactly once per process (module-level
+ * forwarder, audit II-5) and forwarded to the *active* channel instance;
+ * while disabled the handler passes every message through unchanged
+ * ("通道关闭完全不挂钩子"). A re-entrancy guard stops our own re-broadcast
+ * from firing the handler again.
  *
  * Fabric event-chain contract: the allow hook is invoked from
  * fabric-message-api's PlayerListMixin, which injects at the *HEAD* of
@@ -61,29 +64,39 @@ class ChatChannel(private val firstLineOf: (UUID) -> Component?) {
     private var rebroadcasting = false
 
     init {
-        ServerMessageEvents.ALLOW_CHAT_MESSAGE.register { message, sender, _ ->
-            if (!enabled || rebroadcasting) return@register true
-            val firstLine = firstLineOf(sender.gameProfile.id()) ?: return@register true
-            val server = sender.level().getServer()
-            val bound = ChatType.bind(ChatType.CHAT, server.registryAccess(), firstLine)
-            // Cancel first, replay later: the deferral guarantees the outer
-            // event chain has concluded before our broadcast re-enters it.
-            // The guard is set inside the task because the deferred
-            // re-broadcast itself fires the event chain again (freshly), and
-            // our own handler must pass it through untouched.
-            server.execute {
-                rebroadcasting = true
-                try {
-                    server.playerList.broadcastChatMessage(message, sender, bound)
-                } finally {
-                    rebroadcasting = false
-                }
+        // Module-level single registration (audit II-5): the newest
+        // constructed instance becomes the receiver of the forwarder; older
+        // instances (a previous server run's manager) are dropped instead of
+        // accumulating one Fabric handler closure per instance.
+        activateChatChannel(this)
+    }
+
+    /**
+     * ALLOW_CHAT_MESSAGE entry point, forwarded by the module-level
+     * registrar. Returns whether the message may proceed.
+     */
+    internal fun allowChatMessage(message: PlayerChatMessage, sender: ServerPlayer): Boolean {
+        if (!enabled || rebroadcasting) return true
+        val firstLine = firstLineOf(sender.gameProfile.id()) ?: return true
+        val server = sender.level().getServer()
+        val bound = ChatType.bind(ChatType.CHAT, server.registryAccess(), firstLine)
+        // Cancel first, replay later: the deferral guarantees the outer
+        // event chain has concluded before our broadcast re-enters it.
+        // The guard is set inside the task because the deferred
+        // re-broadcast itself fires the event chain again (freshly), and
+        // our own handler must pass it through untouched.
+        server.execute {
+            rebroadcasting = true
+            try {
+                server.playerList.broadcastChatMessage(message, sender, bound)
+            } finally {
+                rebroadcasting = false
             }
-            // Cancel the vanilla broadcast; the deferred task delivers the
-            // same message (signatures untouched) with the decorated sender
-            // name.
-            false
         }
+        // Cancel the vanilla broadcast; the deferred task delivers the
+        // same message (signatures untouched) with the decorated sender
+        // name.
+        return false
     }
 
     fun enable() {
