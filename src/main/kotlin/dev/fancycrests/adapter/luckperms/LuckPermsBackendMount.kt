@@ -107,6 +107,9 @@ internal class LuckPermsPermissionBackend(
      */
     override fun isReady(uuid: UUID): Boolean = luckPerms.userManager.getUser(uuid) != null
 
+    /** Starts the lazy user load when core defers revalidation. */
+    override fun warmUp(uuid: UUID) = requestLazyLoad(uuid)
+
     override fun explicitVerdict(uuid: UUID, node: String): dev.fancycrests.api.PermissionVerdict {
         val user = luckPerms.userManager.getUser(uuid)
         if (user == null) {

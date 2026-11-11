@@ -589,6 +589,11 @@ class SelectionService(
         // unequip: defer entirely and let the backend's own readiness event
         // (load completion) drive the recheck, by which time isReady is true.
         if (!permissions.isReady(uuid)) {
+            // Deferred revalidation never consults explicitVerdict, so the
+            // lazy user load it would have triggered must be started here;
+            // the backend's load-completion event then drives the real
+            // recheck once readiness flips.
+            permissions.warmUp(uuid)
             val revision = stateOf(uuid).revision
             callback(SelectionResult.Success("deferred", revision, revision))
             return

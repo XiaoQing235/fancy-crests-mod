@@ -34,6 +34,15 @@ interface PermissionBackend {
      * answer would never be rolled back. Defaults to always ready.
      */
     fun isReady(uuid: UUID): Boolean = true
+
+    /**
+     * Ask this backend to make itself ready for [uuid] (e.g. trigger the
+     * external provider's user load). Invoked exactly when a revalidation
+     * is deferred because [isReady] returned false — the permission checks
+     * that would otherwise have kicked off a lazy load never ran. The
+     * backend's own load-completion event then drives the real recheck.
+     */
+    fun warmUp(uuid: UUID) {}
 }
 
 /** How a node is decided when no backend gave an explicit verdict. */
@@ -178,6 +187,16 @@ class PermissionManager(
      */
     fun isReady(uuid: UUID): Boolean =
         (backendChain + dynamicBackends).all { it.isReady(uuid) }
+
+    /**
+     * Trigger every backend's readiness path for [uuid]; called when a
+     * revalidation is deferred so lazy user loads still start.
+     */
+    fun warmUp(uuid: UUID) {
+        for (backend in backendChain + dynamicBackends) {
+            runCatching { backend.warmUp(uuid) }
+        }
+    }
 
     override fun check(playerUuid: UUID, node: String): PermissionVerdict {
         // 1. explicit verdicts. A deny from ANY backend wins over an allow from

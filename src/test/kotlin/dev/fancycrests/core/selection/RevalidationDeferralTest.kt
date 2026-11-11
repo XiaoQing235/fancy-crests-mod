@@ -36,6 +36,7 @@ class RevalidationDeferralTest {
         override val name = "lazy"
         var loaded = true
         var allowGuarded = true
+        var warmUps = 0
 
         override fun explicitVerdict(playerUuid: UUID, node: String): PermissionVerdict =
             when {
@@ -46,6 +47,10 @@ class RevalidationDeferralTest {
             }
 
         override fun isReady(playerUuid: UUID): Boolean = loaded
+
+        override fun warmUp(playerUuid: UUID) {
+            warmUps++
+        }
     }
 
     private val backend = LazyBackend()
@@ -96,6 +101,10 @@ class RevalidationDeferralTest {
         val result = await<SelectionResult> { cb -> service.revalidatePlayer(uuid, "login", cb) }
         assertEquals("deferred", (result as SelectionResult.Success).operationId)
         assertEquals(listOf(TitleId("guarded")), service.stateOf(uuid).prefixes)
+        // The deferred revalidation must still kick off the backend's lazy
+        // load (smoke-test regression: nothing else triggers it for players
+        // outside the vanilla login path).
+        assertEquals(1, backend.warmUps)
     }
 
     @Test
