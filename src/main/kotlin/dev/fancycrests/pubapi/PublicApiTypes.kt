@@ -47,6 +47,12 @@ enum class ApiRejectionReason {
     NICKNAME_OCCUPIED,
     EVENT_CANCELLED,
     PLAYER_OFFLINE,
+    /**
+     * The operation body crashed before delivering its own completion (core
+     * catch-all). The player's state was NOT changed by this operation, so
+     * retrying the same call is safe.
+     */
+    INTERNAL_ERROR,
     /** Public-API only: the optional [FancyCrestsPublicApi] actor lacked the required admin node. */
     MISSING_PERMISSION,
     ;
