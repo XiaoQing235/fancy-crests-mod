@@ -119,8 +119,19 @@ class RefreshScheduler(
         if (ruleIds.isEmpty()) return
         for (uuid in adapter.onlinePlayerUuids()) {
             try {
-                val matched = resolver.matchedRule(uuid, adapter.dimensionKey(uuid)) ?: continue
-                if (matched.id in ruleIds) {
+                val matched = resolver.matchedRule(uuid, adapter.dimensionKey(uuid))
+                if (matched == null) {
+                    // No rule matches the player's current dimension any
+                    // more (audit #7): the last published second line was
+                    // matched in another dimension and is stale. Re-resolve
+                    // and publishIfChanged clears it (the second line
+                    // becomes null). Players without a published view are
+                    // skipped — there is nothing to clear and re-resolving
+                    // every period would be pure busy work.
+                    if (publisher.latestView(uuid)?.snapshot != null) {
+                        publisher.publishIfChanged(stateOf(uuid))
+                    }
+                } else if (matched.id in ruleIds) {
                     publisher.publishIfChanged(stateOf(uuid))
                 }
             } catch (t: Throwable) {
