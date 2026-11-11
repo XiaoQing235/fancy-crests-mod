@@ -6,6 +6,7 @@ import eu.pb4.placeholders.api.Placeholder
 import eu.pb4.placeholders.api.Placeholders
 import eu.pb4.placeholders.api.PlaceholderResult
 import eu.pb4.placeholders.api.ServerPlaceholderContext
+import net.minecraft.network.chat.Component
 import net.minecraft.resources.Identifier
 import net.minecraft.server.level.ServerPlayer
 import org.slf4j.Logger
@@ -25,6 +26,16 @@ import java.util.concurrent.ConcurrentHashMap
  * equipped prefixes/suffixes, effective display name, resolved second line;
  * empty when there is nothing to show. This adapter only translates values
  * and never fabricates data.
+ *
+ * Empty-state semantics ("empty input renders as empty output"): a
+ * placeholder's purpose is text concatenation, so every *normal* empty state
+ * — no player bound to the context, nothing equipped, no nickname yet —
+ * resolves to `value(Component.empty())`. The engine's default consumers
+ * render an `invalid` result as literal diagnostics such as
+ * `[fancycrests:prefix: no value]`, which would corrupt the surrounding text;
+ * an empty component renders as nothing. `invalid` is reserved for genuinely
+ * abnormal states (resolution loop, resolver crash) where surfacing that
+ * something is wrong is the more useful behaviour.
  *
  * Safety (plan chapter 5):
  *  - values are read from published immutable snapshots via the service, so
@@ -69,7 +80,7 @@ internal class PlaceholderApiRegistrations private constructor(
             context: ServerPlaceholderContext,
         ): PlaceholderResult {
             val target = targetUuid(context)
-                ?: return PlaceholderResult.invalid("fancycrests:${key.value}: no player in placeholder context")
+                ?: return PlaceholderResult.value(Component.empty())
             if (!ResolveChain.enter(identifier.toString())) {
                 // Loop or runaway nesting: yield an empty value, never recurse.
                 GuardedLog.rateLimited(logger, "loop:${identifier}") {
@@ -82,9 +93,11 @@ internal class PlaceholderApiRegistrations private constructor(
                 if (component != null) {
                     PlaceholderResult.value(component)
                 } else {
-                    // Unknown key or no value yet: invalid, so the engine can
-                    // surface the raw token instead of fabricated text.
-                    PlaceholderResult.invalid("fancycrests:${key.value}: no value")
+                    // Normal empty business state (nothing equipped / no value
+                    // yet): render as empty text. invalid would make default
+                    // consumers print "[fancycrests:<key>: no value]" into the
+                    // surrounding text instead of nothing.
+                    PlaceholderResult.value(Component.empty())
                 }
             } catch (t: Throwable) {
                 GuardedLog.rateLimited(logger, "error:${identifier}", t) {
