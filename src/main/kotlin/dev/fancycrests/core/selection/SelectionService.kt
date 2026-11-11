@@ -21,6 +21,7 @@ import dev.fancycrests.core.storage.SqliteStorage
 import dev.fancycrests.core.storage.StateSaveResult
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import net.minecraft.network.chat.Component
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -52,9 +53,14 @@ enum class RejectionReason {
 
     /**
      * The operation body crashed before delivering its own completion
-     * (backend/listener/user-code exception caught by the queue guard). The
-     * player's state was not changed by this operation, so the caller may
-     * safely retry.
+     * (backend/listener/user-code exception caught by the queue guard) and
+     * before anything was committed — pre-commit failures only: validation,
+     * permission backends, pre-event listeners, storage rejection. The
+     * player's state is guaranteed unchanged, so the caller may safely
+     * retry. Failures after the storage layer reports the write committed
+     * never use this reason: the committed result is delivered instead and
+     * only the display cascade is allowed to fail (logged, never rewriting
+     * the business outcome).
      */
     INTERNAL_ERROR,
 }
@@ -103,6 +109,13 @@ sealed interface Eligibility {
  * after the previous one completed commit and publish), so a stale callback
  * can never overwrite newer state. Failures never report success and publish
  * nothing.
+ *
+ * Completion delivery is phase-aware: a pre-commit crash answers
+ * Rejected(INTERNAL_ERROR) with the state guaranteed unchanged, while a
+ * post-commit failure (publish/post-event after the write committed) never
+ * rewrites the committed result — the display failure is logged and the true
+ * result is delivered. Each operation's completion fires at most once
+ * (delivery latch), even when the user callback itself throws.
  *
  * All public methods must be called on the main thread; callbacks arrive on
  * the main thread as well.
@@ -225,9 +238,10 @@ class SelectionService(
         expectedSlot: TitleSlot? = null,
         callback: (SelectionResult) -> Unit,
     ) {
-        submit(uuid, crashCompletion(callback)) { done ->
+        val deliver = deliverOnce(callback)
+        submit(uuid, crashCompletion(deliver)) { done ->
             if (!canModifyEquipment(uuid)) {
-                callback(
+                deliver(
                     SelectionResult.Rejected(
                         RejectionReason.MISSING_PERMISSION,
                         "you lack '${Permissions.EQUIP}'",
@@ -239,12 +253,12 @@ class SelectionService(
             val current = stateOf(uuid)
             val definition = catalog.get(titleId)
             if (definition == null) {
-                callback(SelectionResult.Rejected(RejectionReason.TITLE_NOT_FOUND, "unknown title '$titleId'"))
+                deliver(SelectionResult.Rejected(RejectionReason.TITLE_NOT_FOUND, "unknown title '$titleId'"))
                 done()
                 return@submit
             }
             if (expectedSlot != null && expectedSlot != definition.slot) {
-                callback(
+                deliver(
                     SelectionResult.Rejected(
                         RejectionReason.SLOT_MISMATCH,
                         "'$titleId' belongs to the ${definition.slot} slot, not $expectedSlot",
@@ -258,7 +272,7 @@ class SelectionService(
                 TitleSlot.SUFFIX -> current.suffixes
             }
             if (list.contains(titleId)) {
-                callback(SelectionResult.Rejected(RejectionReason.ALREADY_EQUIPPED, "'$titleId' is already equipped"))
+                deliver(SelectionResult.Rejected(RejectionReason.ALREADY_EQUIPPED, "'$titleId' is already equipped"))
                 done()
                 return@submit
             }
@@ -267,7 +281,7 @@ class SelectionService(
                 TitleSlot.SUFFIX -> configProvider().equipment.maxSuffixes
             }
             if (list.size >= limit) {
-                callback(
+                deliver(
                     SelectionResult.Rejected(
                         RejectionReason.LIMIT_REACHED,
                         "slot ${definition.slot} is full ($limit)",
@@ -278,7 +292,7 @@ class SelectionService(
             }
             when (val eligibility = isEligible(uuid, titleId)) {
                 Eligibility.NotEligible -> {
-                    callback(
+                    deliver(
                         SelectionResult.Rejected(
                             RejectionReason.NOT_ELIGIBLE,
                             "you do not own '$titleId' and lack its permission",
@@ -300,7 +314,7 @@ class SelectionService(
                 current = current,
                 candidate = candidate,
                 reason = reason,
-                callback = callback,
+                deliver = deliver,
                 done = done,
             )
         }
@@ -308,9 +322,10 @@ class SelectionService(
 
     /** Removes one or all titles of [slot], preserving the order of the rest. */
     fun unequip(uuid: UUID, slot: TitleSlot, target: UnequipTarget, reason: String, callback: (SelectionResult) -> Unit) {
-        submit(uuid, crashCompletion(callback)) { done ->
+        val deliver = deliverOnce(callback)
+        submit(uuid, crashCompletion(deliver)) { done ->
             if (!canModifyEquipment(uuid)) {
-                callback(
+                deliver(
                     SelectionResult.Rejected(
                         RejectionReason.MISSING_PERMISSION,
                         "you lack '${Permissions.EQUIP}'",
@@ -327,7 +342,7 @@ class SelectionService(
                         TitleSlot.SUFFIX -> current.suffixes
                     }
                     if (!present.contains(target.titleId)) {
-                        callback(
+                        deliver(
                             SelectionResult.Rejected(
                                 RejectionReason.TITLE_NOT_FOUND,
                                 "'${target.titleId}' is not equipped in this slot",
@@ -345,7 +360,7 @@ class SelectionService(
             }
             if (removed.isEmpty()) {
                 // Nothing to do: report success without a transaction.
-                callback(SelectionResult.Success("noop", current.revision, current.revision))
+                deliver(SelectionResult.Success("noop", current.revision, current.revision))
                 done()
                 return@submit
             }
@@ -359,7 +374,7 @@ class SelectionService(
                 current = current,
                 candidate = candidate,
                 reason = reason,
-                callback = callback,
+                deliver = deliver,
                 done = done,
             )
         }
@@ -371,11 +386,12 @@ class SelectionService(
 
     /** Sets the nickname ([text] non-null) or resets it (null). Display-only. */
     fun setNickname(uuid: UUID, text: String?, reason: String, callback: (SelectionResult) -> Unit) {
-        submit(uuid, crashCompletion(callback)) { done ->
+        val deliver = deliverOnce(callback)
+        submit(uuid, crashCompletion(deliver)) { done ->
             val current = stateOf(uuid)
             if (text == null) {
                 if (current.nickname == null) {
-                    callback(SelectionResult.Success("noop", current.revision, current.revision))
+                    deliver(SelectionResult.Success("noop", current.revision, current.revision))
                     done()
                     return@submit
                 }
@@ -385,7 +401,7 @@ class SelectionService(
                     current = current,
                     candidate = current.copy(nickname = null),
                     reason = reason,
-                    callback = callback,
+                    deliver = deliver,
                     done = done,
                 )
                 return@submit
@@ -393,18 +409,18 @@ class SelectionService(
 
             val config = configProvider()
             if (!config.nickname.allowSet) {
-                callback(SelectionResult.Rejected(RejectionReason.NICKNAME_DISABLED, "nicknames are disabled"))
+                deliver(SelectionResult.Rejected(RejectionReason.NICKNAME_DISABLED, "nicknames are disabled"))
                 done()
                 return@submit
             }
             val rejection = validateNickname(uuid, text, config)
             if (rejection != null) {
-                callback(rejection)
+                deliver(rejection)
                 done()
                 return@submit
             }
             if (text == current.nickname) {
-                callback(SelectionResult.Success("noop", current.revision, current.revision))
+                deliver(SelectionResult.Success("noop", current.revision, current.revision))
                 done()
                 return@submit
             }
@@ -414,7 +430,7 @@ class SelectionService(
                 current = current,
                 candidate = current.copy(nickname = text),
                 reason = reason,
-                callback = callback,
+                deliver = deliver,
                 done = done,
             )
         }
@@ -509,15 +525,17 @@ class SelectionService(
 
     /** Grants a title (source "local" for admin commands). */
     fun grant(uuid: UUID, titleId: TitleId, source: String, reason: String, callback: (SelectionResult) -> Unit) {
-        submit(uuid, crashCompletion(callback)) { done ->
+        val deliver = deliverOnce(callback)
+        submit(uuid, crashCompletion(deliver)) { done ->
             if (catalog.get(titleId) == null) {
-                callback(SelectionResult.Rejected(RejectionReason.TITLE_NOT_FOUND, "unknown title '$titleId'"))
+                deliver(SelectionResult.Rejected(RejectionReason.TITLE_NOT_FOUND, "unknown title '$titleId'"))
                 done()
                 return@submit
             }
             val operationId = eventBus.newOperationId()
             val record = OwnershipRecord(uuid, titleId, source, System.currentTimeMillis())
             val current = stateOf(uuid)
+            val revision = current.revision
             val candidateOwnership = ownershipOf(uuid)
                 .filterNot { it.titleId == titleId && it.source == source } + record
             val pre = TitleChangeEventPre(
@@ -530,7 +548,7 @@ class SelectionService(
                 candidateOwnership = candidateOwnership.sortedBy { it.grantedAt },
             )
             if (eventBus.firePre(pre)) {
-                callback(SelectionResult.Cancelled)
+                deliver(SelectionResult.Cancelled)
                 done()
                 return@submit
             }
@@ -538,22 +556,27 @@ class SelectionService(
                 try {
                     when (result) {
                         is OwnershipWriteResult.Written -> {
+                            // Post-commit from here on: the ownership row is
+                            // durable, so a display-layer failure must not
+                            // rewrite the business result (audit #2).
                             recordOwnership(uuid, record)
-                            publisher.publish(stateOf(uuid))
-                            eventBus.firePost(
-                                TitleChangeEventPost(
-                                    uuid = uuid,
-                                    operationId = operationId,
-                                    type = TitleOperationType.GRANT,
-                                    oldRevision = stateOf(uuid).revision,
-                                    newRevision = stateOf(uuid).revision,
-                                    reason = reason,
-                                ),
-                            )
-                            callback(SelectionResult.Success(operationId.value, stateOf(uuid).revision, stateOf(uuid).revision))
+                            runPostCommit(uuid, "publish") { publisher.publish(stateOf(uuid)) }
+                            runPostCommit(uuid, "post event") {
+                                eventBus.firePost(
+                                    TitleChangeEventPost(
+                                        uuid = uuid,
+                                        operationId = operationId,
+                                        type = TitleOperationType.GRANT,
+                                        oldRevision = revision,
+                                        newRevision = revision,
+                                        reason = reason,
+                                    ),
+                                )
+                            }
+                            deliver(SelectionResult.Success(operationId.value, revision, revision))
                         }
                         is OwnershipWriteResult.Error ->
-                            callback(SelectionResult.StorageFailure(result.exception.message ?: "ownership write failed"))
+                            deliver(SelectionResult.StorageFailure(result.exception.message ?: "ownership write failed"))
                     }
                 } finally {
                     // The completion signal must survive a throwing publish or
@@ -566,9 +589,11 @@ class SelectionService(
 
     /** Revokes an ownership grant and rechecks equipped titles afterwards. */
     fun revoke(uuid: UUID, titleId: TitleId, source: String, reason: String, callback: (SelectionResult) -> Unit) {
-        submit(uuid, crashCompletion(callback)) { done ->
+        val deliver = deliverOnce(callback)
+        submit(uuid, crashCompletion(deliver)) { done ->
             val operationId = eventBus.newOperationId()
             val current = stateOf(uuid)
+            val revision = current.revision
             val candidateOwnership = ownershipOf(uuid)
                 .filterNot { it.titleId == titleId && it.source == source }
             val pre = TitleChangeEventPre(
@@ -581,7 +606,7 @@ class SelectionService(
                 candidateOwnership = candidateOwnership,
             )
             if (eventBus.firePre(pre)) {
-                callback(SelectionResult.Cancelled)
+                deliver(SelectionResult.Cancelled)
                 done()
                 return@submit
             }
@@ -589,24 +614,31 @@ class SelectionService(
                 try {
                     when (result) {
                         is OwnershipWriteResult.Written -> {
+                            // Post-commit from here on: the ownership row is
+                            // deleted, so a display-layer failure must not
+                            // rewrite the business result (audit #2).
                             dropOwnership(uuid, titleId, source)
-                            publisher.publish(stateOf(uuid))
-                            eventBus.firePost(
-                                TitleChangeEventPost(
-                                    uuid = uuid,
-                                    operationId = operationId,
-                                    type = TitleOperationType.REVOKE,
-                                    oldRevision = stateOf(uuid).revision,
-                                    newRevision = stateOf(uuid).revision,
-                                    reason = reason,
-                                ),
-                            )
+                            runPostCommit(uuid, "publish") { publisher.publish(stateOf(uuid)) }
+                            runPostCommit(uuid, "post event") {
+                                eventBus.firePost(
+                                    TitleChangeEventPost(
+                                        uuid = uuid,
+                                        operationId = operationId,
+                                        type = TitleOperationType.REVOKE,
+                                        oldRevision = revision,
+                                        newRevision = revision,
+                                        reason = reason,
+                                    ),
+                                )
+                            }
                             // Removing ownership may invalidate an equipped title.
-                            revalidatePlayer(uuid, "ownership-revoked") {}
-                            callback(SelectionResult.Success(operationId.value, stateOf(uuid).revision, stateOf(uuid).revision))
+                            runPostCommit(uuid, "recheck") {
+                                revalidatePlayer(uuid, "ownership-revoked") {}
+                            }
+                            deliver(SelectionResult.Success(operationId.value, revision, revision))
                         }
                         is OwnershipWriteResult.Error ->
-                            callback(SelectionResult.StorageFailure(result.exception.message ?: "ownership delete failed"))
+                            deliver(SelectionResult.StorageFailure(result.exception.message ?: "ownership delete failed"))
                     }
                 } finally {
                     // As in grant: a throwing callback must not wedge the queue.
@@ -627,21 +659,22 @@ class SelectionService(
      * Persisted selections are never treated as permanent authorization.
      */
     fun revalidatePlayer(uuid: UUID, reason: String, callback: (SelectionResult) -> Unit) {
+        val deliver = deliverOnce(callback)
         // A backend that cannot answer yet (external provider still loading
         // the user) must not turn interim UNDEFINED verdicts into a persisted
         // unequip: defer entirely and let the backend's own readiness event
         // (load completion) drive the recheck, by which time isReady is true.
         if (!permissions.isReady(uuid)) {
-            deferRevalidation(uuid, callback)
+            deferRevalidation(uuid, deliver)
             return
         }
-        submit(uuid, crashCompletion(callback)) { done ->
+        submit(uuid, crashCompletion(deliver)) { done ->
             // Readiness is also re-checked at execution time: while this
             // operation waited in the queue, the backend data may have been
             // unloaded (audit #3), and executing anyway would again persist
             // an unequip on interim UNDEFINED verdicts.
             if (!permissions.isReady(uuid)) {
-                deferRevalidation(uuid, callback)
+                deferRevalidation(uuid, deliver)
                 done()
                 return@submit
             }
@@ -656,8 +689,10 @@ class SelectionService(
             val keptPrefixes = eligiblePrefixes.take(config.equipment.maxPrefixes)
             val keptSuffixes = eligibleSuffixes.take(config.equipment.maxSuffixes)
             if (keptPrefixes == current.prefixes && keptSuffixes == current.suffixes) {
-                publisher.publish(current)
-                callback(SelectionResult.Success("recheck", current.revision, current.revision))
+                // Nothing changed: the business outcome is "no recheck
+                // needed"; a failing re-publish must not rewrite it.
+                runPostCommit(uuid, "recheck publish") { publisher.publish(current) }
+                deliver(SelectionResult.Success("recheck", current.revision, current.revision))
                 done()
                 return@submit
             }
@@ -685,7 +720,7 @@ class SelectionService(
                 current = current,
                 candidate = candidate,
                 reason = reason,
-                callback = callback,
+                deliver = deliver,
                 done = done,
             )
         }
@@ -745,12 +780,39 @@ class SelectionService(
     // ----------------------------------------------------------------------
 
     /**
+     * Runs one post-commit step (publish, post event, follow-up recheck).
+     * By the time these run the database row is already committed and the
+     * revision advanced, so a display-layer failure must never rewrite the
+     * business result: it is logged and the committed result is still
+     * delivered (audit #2). Without the guard, a throwing publisher turned a
+     * committed operation into Rejected(INTERNAL_ERROR) claiming the state
+     * was unchanged and "safe to retry" — a retry would then duplicate
+     * grants or hit ALREADY_EQUIPPED on a re-equip, with the caller left
+     * believing nothing happened.
+     */
+    private fun runPostCommit(uuid: UUID, step: String, block: () -> Unit) {
+        try {
+            block()
+        } catch (t: Throwable) {
+            LOGGER.error(
+                "post-commit {} for player {} failed; the committed result is still delivered",
+                step,
+                uuid,
+                t,
+            )
+        }
+    }
+
+    /**
      * Shared commit pipeline: pre event on the candidate, optimistic write,
      * main-thread publish, post event. [done] is invoked exactly once on
      * every path (async completions included): the storage callback wraps
      * its body in try/finally and [submit] guards the whole body against
      * crashes, so a throwing listener or user callback can never wedge the
-     * player's operation queue.
+     * player's operation queue. [deliver] is latched (see [deliverOnce]) so
+     * the completion fires at most once, and once the storage layer reports
+     * [StateSaveResult.Saved] the committed result is delivered no matter
+     * what the post-commit cascade does (see [runPostCommit]).
      */
     private fun commitState(
         uuid: UUID,
@@ -758,13 +820,13 @@ class SelectionService(
         current: PlayerTitleState,
         candidate: PlayerTitleState,
         reason: String,
-        callback: (SelectionResult) -> Unit,
+        deliver: (SelectionResult) -> Unit,
         done: () -> Unit,
     ) {
         val operationId = eventBus.newOperationId()
         val pre = TitleChangeEventPre(uuid, operationId, type, current, candidate, reason)
         if (eventBus.firePre(pre)) {
-            callback(SelectionResult.Cancelled)
+            deliver(SelectionResult.Cancelled)
             done()
             return
         }
@@ -778,23 +840,28 @@ class SelectionService(
                         // per-player serialization means this can only be the
                         // newest op, but an online count check keeps it honest.
                         states[uuid] = committed
-                        publisher.publish(committed)
-                        eventBus.firePost(
-                            TitleChangeEventPost(
-                                uuid = uuid,
-                                operationId = operationId,
-                                type = type,
-                                oldRevision = current.revision,
-                                newRevision = result.newRevision,
-                                reason = reason,
-                            ),
-                        )
-                        callback(SelectionResult.Success(operationId.value, current.revision, result.newRevision))
+                        // The write is committed and the revision advanced:
+                        // from here on this outcome is the truth, and only
+                        // the display cascade is allowed to fail (audit #2).
+                        runPostCommit(uuid, "publish") { publisher.publish(committed) }
+                        runPostCommit(uuid, "post event") {
+                            eventBus.firePost(
+                                TitleChangeEventPost(
+                                    uuid = uuid,
+                                    operationId = operationId,
+                                    type = type,
+                                    oldRevision = current.revision,
+                                    newRevision = result.newRevision,
+                                    reason = reason,
+                                ),
+                            )
+                        }
+                        deliver(SelectionResult.Success(operationId.value, current.revision, result.newRevision))
                     }
                     StateSaveResult.RevisionConflict ->
-                        callback(SelectionResult.Conflict)
+                        deliver(SelectionResult.Conflict)
                     is StateSaveResult.Error ->
-                        callback(SelectionResult.StorageFailure(result.exception.message ?: "state write failed"))
+                        deliver(SelectionResult.StorageFailure(result.exception.message ?: "state write failed"))
                 }
             } finally {
                 // The completion signal must survive a throwing publish or
@@ -809,15 +876,37 @@ class SelectionService(
     // ----------------------------------------------------------------------
 
     /**
-     * Completion delivered when an operation body crashes before its own
-     * completion: the queue slot was released and the crash struck before
-     * anything was committed, so the state is unchanged and the caller may
-     * safely retry. Without it the caller's callback (API future, GUI
-     * debounce) would hang forever on a crashed operation (audit #4).
+     * Wraps the caller's callback into the operation's single delivery
+     * latch: the first result wins, any further delivery attempt — notably
+     * the crash completion re-entering after a user callback threw on
+     * receiving its result (audit #2) — is ignored. Normal paths already
+     * deliver exactly once; the latch only suppresses the redundant second
+     * delivery, so the delivery semantics of healthy operations are
+     * unchanged.
      */
-    private fun crashCompletion(callback: (SelectionResult) -> Unit): (Throwable) -> Unit =
+    private fun deliverOnce(callback: (SelectionResult) -> Unit): (SelectionResult) -> Unit {
+        val delivered = AtomicBoolean(false)
+        return { result ->
+            if (delivered.compareAndSet(false, true)) {
+                callback(result)
+            }
+        }
+    }
+
+    /**
+     * Completion delivered when an operation crashes before delivering its
+     * own result: the queue slot was released and the crash struck before
+     * anything was committed (pre-commit only — validation, permission
+     * backend, pre-event listener, storage rejection), so the state is
+     * unchanged and the caller may safely retry. Without it the caller's
+     * callback (API future, GUI debounce) would hang forever on a crashed
+     * operation (audit #4). The [deliver] latch makes this a no-op when the
+     * real result already went out: a callback that throws after receiving
+     * its result must not be handed a second, contradictory one (audit #2).
+     */
+    private fun crashCompletion(deliver: (SelectionResult) -> Unit): (Throwable) -> Unit =
         { t ->
-            callback(
+            deliver(
                 SelectionResult.Rejected(
                     RejectionReason.INTERNAL_ERROR,
                     "operation crashed: ${t.message ?: t.javaClass.simpleName}",
@@ -849,8 +938,13 @@ class SelectionService(
      * forever, which would deadlock every future operation of that player.
      * The wrapped [done] is idempotent, so a body that throws after already
      * scheduling its async completion cannot double-fire it. After the slot
-     * is released the operation's crash completion runs, so the caller's
-     * callback (API future, GUI debounce) is always answered.
+     * is released the operation's crash completion runs, which the delivery
+     * latch turns into a no-op when the real result already went out — so
+     * the caller's callback fires at most once even for a user callback
+     * that throws on receiving its result (audit #2). Crashes reaching this
+     * guard are pre-commit by construction: the post-commit cascade is
+     * guarded (see [runPostCommit]) and delivers the committed result
+     * instead.
      */
     private fun runGuarded(uuid: UUID, operation: PendingOperation, done: () -> Unit) {
         var signalled = false
