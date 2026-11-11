@@ -34,6 +34,14 @@ sealed interface TargetResolution {
  */
 object CommandSupport {
 
+    /**
+     * Admin node of `/fancycrests nickname reset <player>` (audit II-4).
+     * Declared here as a literal because the frozen `dev.fancycrests.api`
+     * Permissions object belongs to another batch; the default policy
+     * (OP_LEVEL 2) is registered in NodeDefaults like every admin node.
+     */
+    const val ADMIN_NICKNAME_RESET = "fancycrests.admin.nickname_reset"
+
     private val UNKNOWN_PLAYER = DynamicCommandExceptionType { name ->
         Component.literal("No player matches '$name'. Only exact online player names and UUIDs are accepted; nicknames are never used as targets.")
     }
@@ -131,6 +139,7 @@ object CommandSupport {
         Permissions.RELOAD,
         Permissions.VALIDATE,
         Permissions.DIAGNOSE,
+        ADMIN_NICKNAME_RESET,
     )
 }
 

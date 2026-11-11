@@ -16,6 +16,7 @@ import dev.fancycrests.core.selection.SelectionResult
 import dev.fancycrests.core.selection.UnequipTarget
 import dev.fancycrests.gui.TitleMenuService
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback
+import net.minecraft.ChatFormatting
 import net.minecraft.commands.CommandSourceStack
 import net.minecraft.commands.Commands
 import net.minecraft.network.chat.Component
@@ -27,8 +28,8 @@ import net.minecraft.network.chat.Component
  * Player commands: menu, equip <prefix|suffix> <id>,
  * unequip <prefix|suffix> <id|all>, nickname <text>, nickname reset.
  * Admin commands (op >= 2 by default, console always allowed):
- * grant/revoke <player> <id>, inspect <player>, preview <player>,
- * reload, validate, diagnose.
+ * nickname reset <player>, grant/revoke <player> <id>,
+ * inspect <player>, preview <player>, reload, validate, diagnose.
  *
  * Targets are UUIDs or exact online player names; nicknames are never
  * accepted. Permission checks run through the core permission service so
@@ -106,7 +107,21 @@ object FancyCrestsCommands {
 
         root.then(
             Commands.literal("nickname")
-                .then(Commands.literal("reset").executes { ctx -> runNickname(ctx, core, null) })
+                .then(
+                    // Self-service reset (no argument) vs the admin form
+                    // (audit II-4): /nickname reset <player> clears another
+                    // player's nickname under fancycrests.admin.nickname_reset.
+                    Commands.literal("reset")
+                        .executes { ctx -> runNickname(ctx, core, null) }
+                        .then(
+                            Commands.argument("player", StringArgumentType.word())
+                                .suggests { ctx, builder ->
+                                    CommandSupport.suggestValues(ctx.source.onlinePlayerNames, builder)
+                                    builder.buildFuture()
+                                }
+                                .executes { ctx -> runAdminNicknameReset(ctx, core) },
+                        ),
+                )
                 .then(
                     Commands.argument("text", StringArgumentType.greedyString())
                         .executes { ctx -> runNickname(ctx, core, StringArgumentType.getString(ctx, "text")) },
@@ -249,6 +264,38 @@ object FancyCrestsCommands {
     // ----------------------------------------------------------------------
     // Admin commands
     // ----------------------------------------------------------------------
+
+    /**
+     * `/fancycrests nickname reset <player>` (audit II-4): clears another
+     * player's stored nickname. The target is a UUID or an exact online
+     * name (nicknames are never accepted as targets); resetting with
+     * text=null bypasses the allowSet/validation gates in the service, so
+     * this is also the remediation path for nicknames left invalid by a
+     * tightened ruleset (they are kept and listed by /diagnose by design —
+     * this command is the explicit admin action).
+     */
+    private fun runAdminNicknameReset(ctx: CommandContext<CommandSourceStack>, core: CoreServices): Int {
+        val source = ctx.source
+        if (!CommandSupport.requirePermission(source, core, CommandSupport.ADMIN_NICKNAME_RESET)) return 0
+        val target = CommandSupport.resolveTargetOrThrow(core, StringArgumentType.getString(ctx, "player"))
+        core.selectionService.setNickname(target.uuid, null, "admin-reset") { result ->
+            reportResult(
+                source,
+                result,
+                successText =
+                "Reset nickname of ${target.displayName} (${target.uuid}); they are shown as their profile name again.",
+            )
+            if (result is SelectionResult.Success) {
+                // Best effort; a no-op if the target is offline.
+                core.serverAdapter.sendSystemMessage(
+                    target.uuid,
+                    Component.literal("An administrator reset your nickname; you are shown as your profile name again.")
+                        .withStyle(ChatFormatting.YELLOW),
+                )
+            }
+        }
+        return Command.SINGLE_SUCCESS
+    }
 
     private fun runGrantRevoke(ctx: CommandContext<CommandSourceStack>, core: CoreServices, grant: Boolean): Int {
         val source = ctx.source

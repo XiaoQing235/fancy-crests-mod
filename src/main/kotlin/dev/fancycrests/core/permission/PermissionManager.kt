@@ -97,6 +97,7 @@ object NodeDefaults {
         node(Permissions.RELOAD, DefaultPolicyType.OP_LEVEL, ADMIN_OP_LEVEL)
         node(Permissions.VALIDATE, DefaultPolicyType.OP_LEVEL, ADMIN_OP_LEVEL)
         node(Permissions.DIAGNOSE, DefaultPolicyType.OP_LEVEL, ADMIN_OP_LEVEL)
+        node("fancycrests.admin.nickname_reset", DefaultPolicyType.OP_LEVEL, ADMIN_OP_LEVEL)
     }
 
     fun policyFor(node: String): NodeDefaultPolicy? = policies[node]
