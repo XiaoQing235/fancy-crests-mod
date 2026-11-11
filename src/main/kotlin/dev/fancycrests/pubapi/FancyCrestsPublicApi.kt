@@ -195,10 +195,14 @@ class FancyCrestsPublicApi(
      * Appends the title to its slot after full validation (eligibility,
      * limits, duplicates). Always executes as the target player; the
      * eligibility rules are the same as for the in-game menu.
+     *
+     * No slot expectation is passed: the title is equipped into the slot its
+     * catalog definition declares, which is the natural contract for programmatic
+     * callers (there is no UI slot to be right or wrong about).
      */
     fun equipTitle(uuid: UUID, titleId: TitleId): CompletableFuture<ApiCallResult> =
         submit { callback ->
-            core.selectionService.equip(uuid, titleId, operationReason, callback)
+            core.selectionService.equip(uuid, titleId, operationReason, callback = callback)
         }
 
     /** Removes one equipped title from its slot. */

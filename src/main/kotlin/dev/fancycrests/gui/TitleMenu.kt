@@ -215,7 +215,16 @@ class TitleMenu private constructor(
                 callback,
             )
         } else {
-            core.selectionService.equip(viewerUuid, action.titleId, "menu", callback)
+            // The menu lists titles per slot, so the action's slot is the
+            // natural expectation; a catalog swap mid-session cannot equip a
+            // title into the wrong slot unnoticed (SLOT_MISMATCH instead).
+            core.selectionService.equip(
+                viewerUuid,
+                action.titleId,
+                "menu",
+                expectedSlot = action.slot,
+                callback = callback,
+            )
         }
     }
 

@@ -205,7 +205,11 @@ object FancyCrestsCommands {
         if (!CommandSupport.requirePermission(source, core, Permissions.EQUIP)) return 0
         val titleId = TitleId(StringArgumentType.getString(ctx, "titleId"))
         val uuid = player.gameProfile.id()
-        core.selectionService.equip(uuid, titleId, "command") { result ->
+        // The slot literal the player typed is the expectation: equipping a
+        // title into the slot it does not belong to is rejected (SLOT_MISMATCH)
+        // instead of silently equipping it into its own slot while reporting
+        // the one the player asked for.
+        core.selectionService.equip(uuid, titleId, "command", expectedSlot = slot) { result ->
             reportResult(source, result, successText = "Equipped ${titleId.value} as ${slot.name.lowercase()}.")
         }
         return Command.SINGLE_SUCCESS
