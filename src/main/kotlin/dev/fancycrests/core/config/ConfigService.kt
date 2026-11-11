@@ -208,6 +208,30 @@ data class ConfigError(val path: String, val message: String) {
 /** Title id reserved by the unequip-all operation; never a valid title id (audit #13). */
 private const val RESERVED_TITLE_ALL = "all"
 
+/** Namespace implied by a dimension shorthand such as `overworld` (batch J3). */
+private const val DEFAULT_DIMENSION_NAMESPACE = "minecraft"
+
+/**
+ * Exact integer tokens: digits, optionally signed, optionally followed by a
+ * zero-only fraction (`3.0`). Exponent notation is a configuration error
+ * rather than a number because it hides the magnitude from the reader.
+ */
+private val EXACT_INT_PATTERN = Regex("-?\\d+(?:\\.0+)?")
+
+/**
+ * Explicit bounds for every numeric field (batch J3). Ranges live in one
+ * place so the parser and the semantic validator cannot drift apart; an
+ * out-of-range value is an error at load time instead of a silent clamp.
+ */
+private object NumericBounds {
+    /** 0 disables the slot entirely; 10 is the practical prefix/suffix cap. */
+    val EQUIP_LIMIT = 0..10
+    val NICKNAME_LENGTH = 1..64
+    val PRIORITY = 0..1000
+    val SORT_ORDER = 0..10000
+    val DISTANCE_BLOCKS = 8.0..128.0
+}
+
 /** Result of a config load or reload attempt. */
 sealed interface ConfigLoadResult {
     /**
@@ -529,19 +553,31 @@ class ConfigService(
     fun validate(root: FancyCrestsConfig): List<ConfigError> {
         val errors = mutableListOf<ConfigError>()
 
-        if (root.equipment.maxPrefixes < 1) {
-            errors += ConfigError("equipment.maxPrefixes", "must be >= 1 (was ${root.equipment.maxPrefixes})")
-        }
-        if (root.equipment.maxSuffixes < 1) {
-            errors += ConfigError("equipment.maxSuffixes", "must be >= 1 (was ${root.equipment.maxSuffixes})")
+        for ((path, limit) in listOf(
+            "equipment.maxPrefixes" to root.equipment.maxPrefixes,
+            "equipment.maxSuffixes" to root.equipment.maxSuffixes,
+        )) {
+            if (limit !in NumericBounds.EQUIP_LIMIT) {
+                errors += ConfigError(
+                    path,
+                    "must be between ${NumericBounds.EQUIP_LIMIT.first} and " +
+                        "${NumericBounds.EQUIP_LIMIT.last} inclusive (was $limit)",
+                )
+            }
         }
 
         val nickname = root.nickname
-        if (nickname.maxLength < 1) {
-            errors += ConfigError("nickname.maxLength", "must be >= 1 (was ${nickname.maxLength})")
-        }
-        if (nickname.minLength < 1) {
-            errors += ConfigError("nickname.minLength", "must be >= 1 (was ${nickname.minLength})")
+        for ((path, length) in listOf(
+            "nickname.maxLength" to nickname.maxLength,
+            "nickname.minLength" to nickname.minLength,
+        )) {
+            if (length !in NumericBounds.NICKNAME_LENGTH) {
+                errors += ConfigError(
+                    path,
+                    "must be between ${NumericBounds.NICKNAME_LENGTH.first} and " +
+                        "${NumericBounds.NICKNAME_LENGTH.last} inclusive (was $length)",
+                )
+            }
         }
         if (nickname.minLength > nickname.maxLength) {
             errors += ConfigError(
@@ -590,8 +626,12 @@ class ConfigService(
         }
 
         val render = root.render
-        if (!render.distanceBlocks.isFinite() || render.distanceBlocks <= 0.0) {
-            errors += ConfigError("render.distanceBlocks", "must be positive and finite (was ${render.distanceBlocks})")
+        if (!render.distanceBlocks.isFinite() || render.distanceBlocks !in NumericBounds.DISTANCE_BLOCKS) {
+            errors += ConfigError(
+                "render.distanceBlocks",
+                "must be between ${NumericBounds.DISTANCE_BLOCKS.start} and " +
+                    "${NumericBounds.DISTANCE_BLOCKS.endInclusive} inclusive (was ${render.distanceBlocks})",
+            )
         }
         for ((path, offset) in listOf(
             "render.firstLineOffset" to render.firstLineOffset,
@@ -632,6 +672,18 @@ class ConfigService(
 
     private fun isValidIdentifier(value: String): Boolean =
         net.minecraft.resources.Identifier.tryParse(value) != null
+
+    /**
+     * Dimension shorthand: a condition without a namespace means the vanilla
+     * namespace (`overworld` -> `minecraft:overworld`), matching how the
+     * runtime compares the rule against a full dimension key (batch J3). The
+     * normalized value is what the config object holds, so both the runtime
+     * comparison and the validation error message see the full identifier.
+     */
+    private fun normalizeDimension(raw: String): String {
+        val trimmed = raw.trim()
+        return if (trimmed.indexOf(':') >= 0) trimmed else "$DEFAULT_DIMENSION_NAMESPACE:$trimmed"
+    }
 
     // ------------------------------------------------------------------
     // JSON mapping (manual, path preserving)
@@ -728,8 +780,12 @@ class ConfigService(
         val equipmentObj = root.optObject("equipment", "equipment", errors)
         equipmentObj.rejectUnknownKeys("equipment", KnownKeys.EQUIPMENT, errors)
         val equipment = EquipmentConfig(
-            maxPrefixes = equipmentObj.strictInt("maxPrefixes", 3, "equipment.maxPrefixes", errors),
-            maxSuffixes = equipmentObj.strictInt("maxSuffixes", 3, "equipment.maxSuffixes", errors),
+            maxPrefixes = equipmentObj.strictInt(
+                "maxPrefixes", 3, "equipment.maxPrefixes", errors, NumericBounds.EQUIP_LIMIT,
+            ),
+            maxSuffixes = equipmentObj.strictInt(
+                "maxSuffixes", 3, "equipment.maxSuffixes", errors, NumericBounds.EQUIP_LIMIT,
+            ),
         )
 
         val nicknameObj = root.optObject("nickname", "nickname", errors)
@@ -742,8 +798,12 @@ class ConfigService(
             Pattern.compile("[A-Za-z0-9_]+")
         }
         val nickname = NicknameConfig(
-            maxLength = nicknameObj.strictInt("maxLength", 16, "nickname.maxLength", errors),
-            minLength = nicknameObj.strictInt("minLength", 3, "nickname.minLength", errors),
+            maxLength = nicknameObj.strictInt(
+                "maxLength", 16, "nickname.maxLength", errors, NumericBounds.NICKNAME_LENGTH,
+            ),
+            minLength = nicknameObj.strictInt(
+                "minLength", 3, "nickname.minLength", errors, NumericBounds.NICKNAME_LENGTH,
+            ),
             pattern = pattern,
             reservedNames = nicknameObj.stringList("reservedNames", "nickname.reservedNames", errors),
             allowSet = nicknameObj.boolean("allowSet", true, "nickname.allowSet", errors),
@@ -807,13 +867,14 @@ class ConfigService(
             conditionObj.rejectUnknownKeys("$path.condition", KnownKeys.CONDITION, errors)
             val condition = SecondLineCondition(
                 dimension = conditionObj.string("dimension", null, "$path.condition.dimension", errors)
-                    ?.takeIf { it.isNotBlank() },
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { normalizeDimension(it) },
                 permission = conditionObj.string("permission", null, "$path.condition.permission", errors)
                     ?.takeIf { it.isNotBlank() },
             )
             rules += SecondLineRuleConfig(
                 id = obj.requiredString("id", "$path.id", errors) ?: "",
-                priority = obj.strictInt("priority", 0, "$path.priority", errors),
+                priority = obj.strictInt("priority", 0, "$path.priority", errors, NumericBounds.PRIORITY),
                 condition = condition,
                 template = obj.requiredString("template", "$path.template", errors) ?: "",
                 refreshTicks = obj.strictInt(
@@ -821,16 +882,23 @@ class ConfigService(
                     default = SecondLineRuleConfig.DEFAULT_REFRESH_TICKS,
                     path = "$path.refreshTicks",
                     errors = errors,
-                    min = SecondLineRuleConfig.MIN_REFRESH_TICKS,
-                    max = SecondLineRuleConfig.MAX_REFRESH_TICKS,
+                    bounds = SecondLineRuleConfig.MIN_REFRESH_TICKS..SecondLineRuleConfig.MAX_REFRESH_TICKS,
                 ),
             )
         }
 
         val renderObj = root.optObject("render", "render", errors)
         renderObj.rejectUnknownKeys("render", KnownKeys.RENDER, errors)
+        val distanceBlocks = renderObj.double("distanceBlocks", 48.0, "render.distanceBlocks", errors)
+        if (distanceBlocks !in NumericBounds.DISTANCE_BLOCKS) {
+            errors += ConfigError(
+                "render.distanceBlocks",
+                "must be between ${NumericBounds.DISTANCE_BLOCKS.start} and " +
+                    "${NumericBounds.DISTANCE_BLOCKS.endInclusive} inclusive (was $distanceBlocks)",
+            )
+        }
         val render = RenderConfig(
-            distanceBlocks = renderObj.double("distanceBlocks", 48.0, "render.distanceBlocks", errors),
+            distanceBlocks = distanceBlocks,
             firstLineOffset = renderObj.optObject("firstLineOffset", "render.firstLineOffset", errors)
                 .toOffset("render.firstLineOffset", errors) ?: OffsetConfig(0.0, 0.4, 0.0),
             secondLineOffset = renderObj.optObject("secondLineOffset", "render.secondLineOffset", errors)
@@ -872,7 +940,7 @@ class ConfigService(
                     permission = obj.string("permission", null, "$path.permission", errors)?.takeIf { it.isNotBlank() },
                     category = obj.string("category", null, "$path.category", errors)?.takeIf { it.isNotBlank() },
                     iconItem = obj.string("iconItem", null, "$path.iconItem", errors)?.takeIf { it.isNotBlank() },
-                    sortOrder = obj.strictInt("sortOrder", 0, "$path.sortOrder", errors),
+                    sortOrder = obj.strictInt("sortOrder", 0, "$path.sortOrder", errors, NumericBounds.SORT_ORDER),
                 )
             }
         }
@@ -969,43 +1037,54 @@ class ConfigService(
     }
 
     /**
-     * Strict integer parse: rejects non-numbers, fractional numbers (never a
-     * silent truncation like JsonPrimitive.asInt) and — when given — values
-     * outside [min]..[max], always reporting the exact JSON path. Legal
-     * integers (including integral floats such as `3.0`) parse unchanged.
+     * Strict integer parse from the JSON token text itself: never through
+     * `Double` (which rounds integers beyond 2^53 and saturates at the Int
+     * bounds), never through `JsonPrimitive.asInt` (which truncates
+     * fractions). Fractional values and exponent notation are errors; an
+     * integral decimal such as `3.0` describes the same integer exactly and
+     * stays accepted. Range violations report the exact JSON path.
      */
     private fun JsonObject.strictInt(
         member: String,
         default: Int,
         path: String,
         errors: MutableList<ConfigError>,
-        min: Int? = null,
-        max: Int? = null,
+        bounds: IntRange? = null,
     ): Int {
         val element = get(member) ?: return default
         val primitive = element as? JsonPrimitive
         if (primitive == null || !primitive.isNumber) {
-            errors += ConfigError(path, "must be an integer${rangeSuffix(min, max)}")
+            errors += ConfigError(path, "must be an integer${boundsSuffix(bounds)}")
             return default
         }
-        val value = primitive.asDouble
-        val isIntegral = !value.isNaN() && kotlin.math.floor(value) == value
-        if (!isIntegral || (min != null && value < min) || (max != null && value > max)) {
-            errors += ConfigError(
-                path,
-                "must be an integer${rangeSuffix(min, max)} (was ${primitive.asString})",
-            )
+        val raw = primitive.asString
+        val value = parseExactInt(raw)
+        if (value == null || (bounds != null && value !in bounds)) {
+            errors += ConfigError(path, "must be an integer${boundsSuffix(bounds)} (was $raw)")
             return default
         }
-        return value.toInt()
+        return value
     }
 
-    private fun rangeSuffix(min: Int?, max: Int?): String = when {
-        min != null && max != null -> " between $min and $max inclusive"
-        min != null -> " >= $min"
-        max != null -> " <= $max"
-        else -> ""
+    /**
+     * Exact integer parse of a JSON number token. Returns null for fractional
+     * values, exponent notation and values outside the Int range, so callers
+     * report an error instead of a rounded or saturated number.
+     */
+    private fun parseExactInt(raw: String): Int? {
+        if (raw.indexOf('e') >= 0 || raw.indexOf('E') >= 0) return null
+        if (!EXACT_INT_PATTERN.matches(raw)) return null
+        return try {
+            java.math.BigDecimal(raw).toBigIntegerExact().intValueExact()
+        } catch (e: ArithmeticException) {
+            null
+        } catch (e: NumberFormatException) {
+            null
+        }
     }
+
+    private fun boundsSuffix(bounds: IntRange?): String =
+        if (bounds == null) "" else " between ${bounds.first} and ${bounds.last} inclusive"
 
     private fun JsonObject.double(member: String, default: Double, path: String, errors: MutableList<ConfigError>): Double {
         val element = get(member) ?: return default
