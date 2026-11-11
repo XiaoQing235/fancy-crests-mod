@@ -14,6 +14,7 @@ import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket
 import net.minecraft.network.syncher.SynchedEntityData
 import net.minecraft.server.MinecraftServer
+import net.minecraft.server.level.ChunkMap
 import net.minecraft.server.level.ServerLevel
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.server.network.ServerGamePacketListenerImpl
@@ -194,40 +195,44 @@ internal class RenderService(initialSettings: RenderSettings) {
      * re-enter tracking range or relog.
      *
      * Fix: when a target state is first created, run [spawnLabels] for every
-     * online observer allowed by [BackfillPolicy] (same dimension, never the
-     * target itself). spawnLabels is idempotent for existing pairings
-     * (early-exit + passenger re-merge only), so overlaps with tracking
-     * events that fire for the same pair are harmless.
+     * online observer allowed by [BackfillPolicy.backfillObservers]: same
+     * dimension, never the target itself, and — since audit #1 — *only*
+     * observers that already track the target on the vanilla tracking layer.
+     * spawnLabels is idempotent for existing pairings (early-exit +
+     * passenger re-merge only), so overlaps with tracking events that fire
+     * for the same pair are harmless.
      *
-     * Design tradeoffs:
-     *  - Tracking range is not queryable from a server mod; the range
-     *    approximation is "same dimension". Over-sending to observers beyond
-     *    vanilla tracking range is accepted because the label entities carry
-     *    a view_range (RenderSettings.renderDistance) that culls them
-     *    client-side beyond that distance, and because the client ignores
-     *    SetPassengers for a vehicle id it does not know (verified 26.2
-     *    bytecode: warn + return; unknown passenger ids are skipped) - no
-     *    client state is corrupted. When such an observer really enters
-     *    tracking range later, START_TRACKING takes spawnLabels' early-exit
-     *    branch, which re-merges passengers onto the now-known vehicle: the
-     *    labels snap onto the player without a re-spawn.
-     *  - The residual gap is an observer within view range but beyond
-     *    tracking range seeing a static label at the target's backfill
-     *    position; bounded by renderDistance exceeding the (typically ~48
-     *    block) player tracking range, and self-corrects on the next
-     *    pairing-building event.
-     *  - Pairings created here for pairs without a vanilla tracking relation
-     *    receive no STOP_TRACKING when the observer leaves the dimension;
-     *    the end-tick world-generation sweep drops those stale-generation
-     *    observer states, and onTargetEntityReplaced / clearTarget / stop
-     *    sweep them like any other pairing.
+     * Tracking query (verified with javap/-c against the 26.2 merged jar):
+     * `ChunkMap.forEachEntityTrackedBy(ServerPlayer, Consumer<Entity>)` is
+     * public and iterates the private `entityMap.values()`, accepting each
+     * `TrackedEntity.entity` whose `seenBy` set contains
+     * `observer.connection` — the exact set `TrackedEntity.updatePlayer`/
+     * `removePlayer` maintain around `ServerEntity.addPairing`/
+     * `removePairing` (seenBy.add precedes addPairing, seenBy.remove
+     * precedes removePairing), i.e. precisely the window in which our
+     * START/STOP_TRACKING handlers run. A backfilled pairing therefore has
+     * a real tracking relation and receives its vanilla STOP when it ends.
+     * Observers that do not (yet) track the target are skipped here and get
+     * labels through the normal START_TRACKING path when they enter range —
+     * an untracked target can no longer leave a label frozen at the backfill
+     * position (nothing drives position sync for entities a client does not
+     * track). Using this public query also avoids accessor mixins into the
+     * package-private `ChunkMap$TrackedEntity` (string-target mixin with
+     * erased return types — the version-fragile shape the audit feared).
      */
     private fun backfillPairings(target: TargetRenderState, player: ServerPlayer) {
         if (!running) return
         val server = this.server ?: return
         val targetLevel = player.level()
-        for (observer in server.playerList.players) {
-            if (!BackfillPolicy.shouldBackfill(target.uuid, targetLevel, observer.uuid, observer.level())) continue
+        val chunkMap = targetLevel.getChunkSource().chunkMap
+        val candidates = server.playerList.players.map { BackfillCandidate(it, it.uuid, it.level()) }
+        val observers = BackfillPolicy.backfillObservers(
+            target.uuid,
+            targetLevel,
+            candidates,
+            isTracked = { observer -> isTracking(chunkMap, observer, player.id) },
+        )
+        for (observer in observers) {
             // The observer's connection may not be attached yet while the
             // channel is starting (no end-tick has run); attaching here also
             // flushes the one-shot virtual-team init, preserving the wire
@@ -237,6 +242,25 @@ internal class RenderService(initialSettings: RenderSettings) {
                 spawnLabels(observer.connection, state, target, player)
             }
         }
+    }
+
+    /**
+     * Vanilla tracking-membership query: does [observer]'s client currently
+     * track the entity with id [targetEntityId] in the dimension of
+     * [chunkMap]? Implemented over the public
+     * `ChunkMap.forEachEntityTrackedBy`, which consults
+     * `TrackedEntity.seenBy` (see [backfillPairings] for the bytecode
+     * evidence). The consumer cannot break the iteration early, so the flag
+     * simply latches; the scan is linear in the dimension's tracked entities
+     * per observer and only runs on rare backfill events (channel start /
+     * first publish of a target / pending-target retry).
+     */
+    private fun isTracking(chunkMap: ChunkMap, observer: ServerPlayer, targetEntityId: Int): Boolean {
+        var tracked = false
+        chunkMap.forEachEntityTrackedBy(observer) { entity ->
+            if (entity.id == targetEntityId) tracked = true
+        }
+        return tracked
     }
 
     fun clearTarget(targetUuid: UUID) {
@@ -569,11 +593,13 @@ internal class RenderService(initialSettings: RenderSettings) {
                 state.worldGeneration += 1
                 // The observer's client rebuilt its world around the level
                 // change. Vanilla stop events clean the pairings it knows
-                // about; retro-pairing states without a vanilla tracking
-                // relation (see backfillPairings) never receive one, so drop
-                // stale-generation states here - without delete packets, for
-                // the same reason as onObserverClientWorldReset: the client
-                // discarded these entities together with the old world.
+                // about - including backfilled ones, which since audit #1
+                // only pair real tracking relations and therefore always
+                // receive their STOP; the sweep below stays as a defensive
+                // catcher for events lost in a dimension-change race -
+                // without delete packets, for the same reason as
+                // onObserverClientWorldReset: the client discarded these
+                // entities together with the old world.
                 synchronized(state.lock) {
                     val entries = state.targets.entries.iterator()
                     while (entries.hasNext()) {
@@ -592,8 +618,8 @@ internal class RenderService(initialSettings: RenderSettings) {
         // world-generation bump so pairings created here carry the current
         // generation. Offline targets stay pending: their join is covered by
         // tracking events, and the first end-tick after join backfills the
-        // remaining same-dimension observers (idempotent for pairs that
-        // tracking events already built).
+        // remaining observers that already track the target (idempotent for
+        // pairs that tracking events already built).
         for ((uuid, target) in targets) {
             if (!target.pairingBackfillPending) continue
             val player = server.playerList.getPlayer(uuid) ?: continue
@@ -622,9 +648,14 @@ internal class RenderService(initialSettings: RenderSettings) {
                             obs.sentSneaking = sneaking
                             sendContent(listener, obs, target, layers = LabelLayer.entries)
                         }
-                        if (passengersChanged) {
+                        if (passengersChanged && sendMergedPassengers(listener, obs, realPassengers)) {
+                            // Advance the observer cache only on a delivered
+                            // mount: it is the fallback base for later
+                            // unmounts and must mirror what the client
+                            // actually holds (a failed merge is retried by
+                            // the next passenger diff or the defensive
+                            // re-merge in spawnLabels' early-exit).
                             obs.lastRealPassengers = realPassengers
-                            sendMergedPassengers(listener, obs, realPassengers)
                         }
                     }
                 }
@@ -722,8 +753,12 @@ internal class RenderService(initialSettings: RenderSettings) {
             // world generation must not take this path: the client rebuilt
             // its world since they were sent, so falling through to the
             // full spawn is the only way the labels come back.
-            existing.lastRealPassengers = player.passengers.map { it.id }
-            sendMergedPassengers(listener, existing, existing.lastRealPassengers)
+            val remergeReal = player.passengers.map { it.id }
+            if (sendMergedPassengers(listener, existing, remergeReal)) {
+                // The cache is the fallback base for later unmounts and
+                // must mirror what the client actually holds.
+                existing.lastRealPassengers = remergeReal
+            }
             return
         }
         if (existing != null) {
@@ -853,8 +888,24 @@ internal class RenderService(initialSettings: RenderSettings) {
         RenderPackets.send(listener, packet)
     }
 
-    private fun sendMergedPassengers(listener: ServerGamePacketListenerImpl, obs: ObserverTargetState, realPassengers: List<Int>) {
-        try {
+    /**
+     * Sends the merged mount (real passengers + live label ids) for one
+     * observer state.
+     *
+     * @return `true` when the packet was delivered; `false` when the send
+     *   failed (already recorded in diagnostics). Callers that advance
+     *   observer caches on the strength of this mount must treat `false` as
+     *   a failed send - swallowing it previously let the second-line ADD
+     *   branch record a successful spawn whose mount the client never
+     *   received (audit #6: the label entity existed but never followed the
+     *   player).
+     */
+    private fun sendMergedPassengers(
+        listener: ServerGamePacketListenerImpl,
+        obs: ObserverTargetState,
+        realPassengers: List<Int>,
+    ): Boolean {
+        return try {
             sendPacket(
                 listener,
                 PassengerPackets.create(
@@ -862,8 +913,31 @@ internal class RenderService(initialSettings: RenderSettings) {
                     PassengerMerge.merge(realPassengers, obs.liveLabelIds()).toIntArray(),
                 ),
             )
+            true
         } catch (t: Exception) {
             RenderDiagnostics.recordError("passenger remount", t)
+            false
+        }
+    }
+
+    /**
+     * Best-effort rollback of a half-delivered second-line spawn: forget the
+     * observer-side id and remove the entity (client-side no-op when the
+     * AddEntity never arrived, verified removeEntity). The shared slot stays
+     * allocated target-side so the next publish re-spawns through the ADD
+     * branch with the same id (the client replaces a pre-existing entity of
+     * the same id).
+     */
+    private fun rollbackSecondLineSpawn(
+        listener: ServerGamePacketListenerImpl,
+        target: TargetRenderState,
+        obs: ObserverTargetState,
+    ) {
+        obs.secondLineId = 0
+        try {
+            sendPacket(listener, ClientboundRemoveEntitiesPacket(target.labelIds.secondLineId))
+        } catch (t: Exception) {
+            RenderDiagnostics.recordError("second line spawn rollback", t)
         }
     }
 
@@ -1015,31 +1089,31 @@ internal class RenderService(initialSettings: RenderSettings) {
                             obs.secondLineId = target.labelIds.secondLineId
                             obs.sentSecondLineOffset = settings.secondLineOffset
                             val live = player.passengers.map { it.id }
-                            obs.lastRealPassengers = live
-                            sendMergedPassengers(listener, obs, live)
-                            // Presence cache advances only after the whole
-                            // spawn was delivered; on failure it stays null
-                            // so the next publish retries this branch (with
-                            // the same slot id).
-                            obs.sentSecondLine = secondNow
+                            if (sendMergedPassengers(listener, obs, live)) {
+                                // Presence cache advances only after the whole
+                                // spawn *including the mount* was delivered; on
+                                // failure it stays null so the next publish
+                                // retries this branch (with the same slot id).
+                                obs.lastRealPassengers = live
+                                obs.sentSecondLine = secondNow
+                            } else {
+                                // Audit #6: the mount packet failed after the
+                                // AddEntity was already delivered. Without a
+                                // mount the second-line entity never follows
+                                // the player, so treat this exactly like a
+                                // send failure: roll the spawn back and keep
+                                // the presence cache at null for a retry.
+                                rollbackSecondLineSpawn(listener, target, obs)
+                            }
                         } catch (t: Exception) {
                             RenderDiagnostics.recordError("second line spawn", t)
-                            obs.secondLineId = 0
                             // The failure may have struck mid-sequence: an
                             // AddEntity can already be on the wire with no
                             // metadata/mount behind it. Best-effort removal
-                            // of the id (client-side no-op when the add never
-                            // arrived, verified removeEntity); the slot stays
-                            // allocated target-side and the next publish
-                            // re-spawns through this branch with the same id.
-                            try {
-                                sendPacket(
-                                    listener,
-                                    ClientboundRemoveEntitiesPacket(target.labelIds.secondLineId),
-                                )
-                            } catch (t2: Exception) {
-                                RenderDiagnostics.recordError("second line spawn rollback", t2)
-                            }
+                            // of the id; the slot stays allocated target-side
+                            // and the next publish re-spawns through this
+                            // branch with the same id.
+                            rollbackSecondLineSpawn(listener, target, obs)
                         }
                     }
                     SecondLineAction.REMOVE -> {
@@ -1047,15 +1121,22 @@ internal class RenderService(initialSettings: RenderSettings) {
                         val removed = obs.secondLineId
                         try {
                             obs.secondLineId = 0 // liveLabelIds() must exclude it for the remount below
-                            sendMergedPassengers(listener, obs, obs.lastRealPassengers)
-                            sendPacket(listener, ClientboundRemoveEntitiesPacket(removed))
-                            obs.sentSecondLine = null
-                            // The first observer whose removal drops the shared
-                            // slot also balances the virtualEntities gauge;
-                            // later observers see id 0 != removed and skip.
-                            if (target.labelIds.secondLineId == removed) {
-                                target.labelIds.secondLineId = 0
-                                RenderDiagnostics.virtualEntities.decrementAndGet()
+                            if (sendMergedPassengers(listener, obs, obs.lastRealPassengers)) {
+                                sendPacket(listener, ClientboundRemoveEntitiesPacket(removed))
+                                obs.sentSecondLine = null
+                                // The first observer whose removal drops the shared
+                                // slot also balances the virtualEntities gauge;
+                                // later observers see id 0 != removed and skip.
+                                if (target.labelIds.secondLineId == removed) {
+                                    target.labelIds.secondLineId = 0
+                                    RenderDiagnostics.virtualEntities.decrementAndGet()
+                                }
+                            } else {
+                                // Remount undelivered: keep the id handle and
+                                // the presence cache paired so the next publish
+                                // retries the removal instead of leaving a dead
+                                // passenger id inside the client's mount list.
+                                obs.secondLineId = removed
                             }
                         } catch (t: Exception) {
                             RenderDiagnostics.recordError("second line removal", t)

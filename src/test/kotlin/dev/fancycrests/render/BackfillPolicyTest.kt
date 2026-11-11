@@ -2,6 +2,7 @@ package dev.fancycrests.render
 
 import java.util.UUID
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -54,5 +55,99 @@ class BackfillPolicyTest {
     @Test
     fun `equal uuids across dimensions stay excluded even though self-check comes first`() {
         assertFalse(BackfillPolicy.shouldBackfill(targetUuid, overworld, targetUuid, nether))
+    }
+
+    // ===== backfillObservers: cheap gates + real tracking relation =====
+
+    private data class PlayerLike(val name: String)
+
+    private fun candidate(player: PlayerLike, uuid: UUID, level: Any) =
+        BackfillCandidate(player, uuid, level)
+
+    @Test
+    fun `tracked same dimension observer receives the backfill`() {
+        val observer = PlayerLike("observer")
+        val kept = BackfillPolicy.backfillObservers(
+            targetUuid, overworld,
+            listOf(candidate(observer, observerUuid, overworld)),
+            isTracked = { true },
+        )
+        assertEquals(listOf(observer), kept)
+    }
+
+    @Test
+    fun `same dimension observer that does not track the target is filtered out`() {
+        // Audit #1: backfilling a pair without a vanilla tracking relation
+        // left the label frozen at the backfill position once the untracked
+        // target moved (no position sync drives it).
+        val kept = BackfillPolicy.backfillObservers(
+            targetUuid, overworld,
+            listOf(candidate(PlayerLike("observer"), observerUuid, overworld)),
+            isTracked = { false },
+        )
+        assertTrue(kept.isEmpty(), "untracked observers must not receive label entities")
+    }
+
+    @Test
+    fun `untracked observers are dropped while tracked ones are kept in one pass`() {
+        val a = PlayerLike("a")
+        val b = PlayerLike("b")
+        val c = PlayerLike("c")
+        val kept = BackfillPolicy.backfillObservers(
+            targetUuid, overworld,
+            listOf(
+                candidate(a, UUID.randomUUID(), overworld),
+                candidate(b, UUID.randomUUID(), overworld),
+                candidate(c, UUID.randomUUID(), nether),
+            ),
+            isTracked = { it !== b }, // a tracked, b not tracked, c never probed
+        )
+        assertEquals(listOf(a), kept)
+    }
+
+    @Test
+    fun `the target itself is excluded even when the predicate claims tracking`() {
+        val kept = BackfillPolicy.backfillObservers(
+            targetUuid, overworld,
+            listOf(candidate(PlayerLike("self"), targetUuid, overworld)),
+            isTracked = { true },
+        )
+        assertTrue(kept.isEmpty())
+    }
+
+    @Test
+    fun `candidate order is preserved among kept observers`() {
+        val first = PlayerLike("first")
+        val second = PlayerLike("second")
+        val kept = BackfillPolicy.backfillObservers(
+            targetUuid, overworld,
+            listOf(
+                candidate(second, UUID.randomUUID(), overworld),
+                candidate(first, UUID.randomUUID(), overworld),
+            ),
+            isTracked = { true },
+        )
+        assertEquals(listOf(second, first), kept)
+    }
+
+    @Test
+    fun `tracking predicate is not consulted for candidates failing the cheap gates`() {
+        // The tracking query scans the dimension's tracked-entity map per
+        // observer; it must only run for candidates that passed the
+        // self/dimension gates.
+        val probed = mutableListOf<UUID>()
+        BackfillPolicy.backfillObservers(
+            targetUuid, overworld,
+            listOf(
+                candidate(PlayerLike("self"), targetUuid, overworld),       // self: cheap-excluded
+                candidate(PlayerLike("nether"), UUID.randomUUID(), nether), // foreign dim: cheap-excluded
+                candidate(PlayerLike("tracked"), observerUuid, overworld),  // probed
+            ),
+            isTracked = {
+                probed.add(observerUuid)
+                true
+            },
+        )
+        assertEquals(listOf(observerUuid), probed, "only the same-dimension non-self candidate is probed")
     }
 }
