@@ -111,7 +111,11 @@ class SnapshotResolver(
                 dev.fancycrests.core.config.TemplateSegmentType.PREFIXES ->
                     equippedTexts(state.prefixes, catalog)
                 dev.fancycrests.core.config.TemplateSegmentType.NAME ->
-                    listOf(Component.literal(effectiveName))
+                    // The effective name may be a nickname carrying legacy
+                    // colour codes; parse them instead of printing the codes
+                    // as plain text (audit #10). Code-free profile names
+                    // parse to the identical literal component.
+                    listOf(LegacyTextParser.parse(effectiveName))
                 dev.fancycrests.core.config.TemplateSegmentType.SUFFIXES ->
                     equippedTexts(state.suffixes, catalog)
             }

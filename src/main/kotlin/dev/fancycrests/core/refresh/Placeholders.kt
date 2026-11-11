@@ -99,9 +99,11 @@ fun registerStandardPlaceholders(
     })
     service.register(StandardPlaceholders.NICKNAME, object : PlaceholderResolver {
         override fun resolve(key: PlaceholderKey, request: PlaceholderRequest): Component? {
-            val state = stateOf(request.target)
-            state.nickname?.let { return Component.literal(it) }
-            viewOf(request.target)?.profileName?.let { return Component.literal(it) }
+            // Nicknames may carry legacy colour codes (audit #10); parse
+            // them. Code-free values (and profile names) parse to the
+            // identical literal component.
+            stateOf(request.target).nickname?.let { return LegacyTextParser.parse(it) }
+            viewOf(request.target)?.profileName?.let { return LegacyTextParser.parse(it) }
             return null
         }
     })
