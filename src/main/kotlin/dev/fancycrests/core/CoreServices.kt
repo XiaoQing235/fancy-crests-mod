@@ -20,6 +20,14 @@ import org.slf4j.LoggerFactory
 import java.nio.file.Path
 import java.util.UUID
 
+/** One nickname that no longer satisfies the active validation rules. */
+data class InvalidNicknameEntry(
+    val uuid: UUID,
+    val profileName: String?,
+    val nickname: String,
+    val reason: String,
+)
+
 /** Aggregated diagnostic snapshot for /fancycrests diagnose. */
 data class DiagnosticsInfo(
     val modVersion: String,
@@ -32,6 +40,13 @@ data class DiagnosticsInfo(
     val storageAvailable: Boolean,
     val storageError: String?,
     val publishedSnapshotTargets: Int,
+    /** Render-module counters/errors injected by the integration layer. */
+    val renderDiagnostics: Map<String, String> = emptyMap(),
+    /**
+     * Online players whose stored nickname violates the current rules.
+     * Kept on purpose (admin decides); listed here and in the admin log.
+     */
+    val invalidNicknames: List<InvalidNicknameEntry> = emptyList(),
 )
 
 /**
@@ -295,7 +310,42 @@ class CoreServices(
         storageAvailable = storageAvailable,
         storageError = storageError,
         publishedSnapshotTargets = snapshotPublisher.trackedTargets,
+        renderDiagnostics = renderDiagnosticsProvider?.invoke() ?: emptyMap(),
+        invalidNicknames = nicknamePolicyViolations(),
     )
+
+    /**
+     * Set by the integration layer: read-only render-module counters and the
+     * last render error, surfaced through /fancycrests diagnose. Null leaves
+     * the section empty (render module absent or not started).
+     */
+    var renderDiagnosticsProvider: (() -> Map<String, String>)? = null
+
+    /**
+     * Online players whose stored nickname no longer satisfies the current
+     * validation rules. Policy (review decision): such nicknames are KEPT -
+     * they keep displaying, are listed here and logged for admins on reload,
+     * and can be cleared with the admin reset command; only newly set
+     * nicknames must immediately satisfy the rules.
+     */
+    fun nicknamePolicyViolations(): List<InvalidNicknameEntry> {
+        if (!isStarted) return emptyList()
+        val config = configService.current
+        return serverAdapter.onlinePlayerUuids().mapNotNull { uuid ->
+            val nickname = selectionService.stateOf(uuid).nickname ?: return@mapNotNull null
+            val rejected = selectionService.validateNickname(uuid, nickname, config)
+            if (rejected == null) {
+                null
+            } else {
+                InvalidNicknameEntry(
+                    uuid = uuid,
+                    profileName = serverAdapter.profileName(uuid),
+                    nickname = nickname,
+                    reason = rejected.detail ?: rejected.reason.name,
+                )
+            }
+        }
+    }
 
     // ----------------------------------------------------------------------
     // Internals
@@ -316,6 +366,18 @@ class CoreServices(
         // Re-check every online player: stale ids (removed/renamed titles,
         // lost eligibility) are unequipped and persisted.
         selectionService.revalidateOnline("config-reloaded")
+        // Nickname policy (review decision): tightened rules never reset
+        // existing nicknames automatically - report them for admin action.
+        val nicknameViolations = nicknamePolicyViolations()
+        if (nicknameViolations.isNotEmpty()) {
+            logger.warn(
+                "Nickname rules tightened; {} online nickname(s) no longer valid (kept, admin action suggested; /fancycrests diagnose lists them): {}",
+                nicknameViolations.size,
+                nicknameViolations.joinToString { entry ->
+                    "${entry.profileName ?: entry.uuid}='${entry.nickname}' (${entry.reason})"
+                },
+            )
+        }
         if (replaceResult.removedIds.isNotEmpty() || replaceResult.slotChangedIds.isNotEmpty()) {
             logger.info(
                 "Catalog reload invalidated {} removed and {} slot-changed titles; affected players were revalidated",
