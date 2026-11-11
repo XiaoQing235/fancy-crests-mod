@@ -177,6 +177,9 @@ data class ConfigError(val path: String, val message: String) {
     override fun toString(): String = "$path: $message"
 }
 
+/** Title id reserved by the unequip-all operation; never a valid title id (audit #13). */
+private const val RESERVED_TITLE_ALL = "all"
+
 /** Result of a config load or reload attempt. */
 sealed interface ConfigLoadResult {
     data class Success(val config: FancyCrestsConfig) : ConfigLoadResult
@@ -440,6 +443,12 @@ class ConfigService(
         for ((index, title) in root.titles.withIndex()) {
             if (title.id.isBlank()) {
                 errors += ConfigError("titles[$index].id", "must not be blank")
+            }
+            if (title.id == RESERVED_TITLE_ALL) {
+                errors += ConfigError(
+                    "titles[$index].id",
+                    "'${title.id}' is reserved for the unequip-all operation and cannot be a title id",
+                )
             }
             if (!titleIds.add(title.id)) {
                 errors += ConfigError("titles[$index].id", "duplicate title id '${title.id}'")
