@@ -47,7 +47,10 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * Note (verified via javap on placeholder-api 3.1.0-beta.1+26.2): the
  * `Placeholders` registry has no unregister method, so [close] disables our
- * entries by re-registering an always-invalid handler.
+ * entries by re-registering an always-invalid handler. The runtime switch
+ * (`channels.placeholdersExport`) needs no re-registration either: it is
+ * evaluated at resolve time, so a config reload toggles the export
+ * immediately and disabled placeholders resolve to empty text.
  */
 internal class PlaceholderApiRegistrations private constructor(
     private val identifiers: List<Identifier>,
@@ -56,18 +59,22 @@ internal class PlaceholderApiRegistrations private constructor(
     companion object {
         private val logger: Logger = LoggerFactory.getLogger("FancyCrests/PlaceholderApi")
 
-        fun register(service: PlaceholderService): PlaceholderApiRegistrations =
+        fun register(service: PlaceholderService, enabled: () -> Boolean): PlaceholderApiRegistrations =
             PlaceholderApiRegistrations(
-                dev.fancycrests.api.StandardPlaceholders.ALL.map { key -> registerOne(service, key) },
+                dev.fancycrests.api.StandardPlaceholders.ALL.map { key -> registerOne(service, key, enabled) },
             )
 
-        private fun registerOne(service: PlaceholderService, key: dev.fancycrests.api.PlaceholderKey): Identifier {
+        private fun registerOne(
+            service: PlaceholderService,
+            key: dev.fancycrests.api.PlaceholderKey,
+            enabled: () -> Boolean,
+        ): Identifier {
             val identifier = Identifier.fromNamespaceAndPath("fancycrests", key.value)
             // The registerServer overload has a phantom <T>; supply it explicitly.
             Placeholders.registerServer<String>(
                 identifier,
                 Placeholder.Handler<ServerPlaceholderContext, String> { context, _ ->
-                    handle(service, key, identifier, context)
+                    handle(service, key, identifier, enabled, context)
                 },
             )
             return identifier
@@ -77,8 +84,14 @@ internal class PlaceholderApiRegistrations private constructor(
             service: PlaceholderService,
             key: dev.fancycrests.api.PlaceholderKey,
             identifier: Identifier,
+            enabled: () -> Boolean,
             context: ServerPlaceholderContext,
         ): PlaceholderResult {
+            // Export switch (channels.placeholdersExport), evaluated per
+            // resolve: while off, the placeholder contributes nothing. Empty
+            // value (not invalid) so consumers render no placeholder text;
+            // the registry has no unregister, this is the disable path.
+            if (!enabled()) return PlaceholderResult.value(Component.empty())
             val target = targetUuid(context)
                 ?: return PlaceholderResult.value(Component.empty())
             if (!ResolveChain.enter(identifier.toString())) {

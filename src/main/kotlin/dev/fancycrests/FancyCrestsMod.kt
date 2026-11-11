@@ -56,7 +56,9 @@ object FancyCrestsMod : ModInitializer {
             // Optional integrations; each mount is guarded by mod presence and
             // never touches core state when its host mod is absent.
             luckPermsMount = LuckPermsAdapter.mount(services)
-            placeholderExport = PlaceholderApiExport.mount(services.placeholderService)
+            placeholderExport = PlaceholderApiExport.mount(services.placeholderService) {
+                services.configService.current.channels.placeholdersExport
+            }
             publicApi = FancyCrestsPublicApi(services, services.placeholderService)
 
             val backends = listOfNotNull(
