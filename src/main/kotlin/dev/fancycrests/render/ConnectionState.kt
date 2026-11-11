@@ -131,6 +131,17 @@ internal class TargetRenderState(
     @JvmField var sneaking: Boolean = false,
     @JvmField var lastRealPassengers: List<Int> = emptyList(),
     /**
+     * True while this target's label pairings still need the end-tick
+     * retro-pairing sweep (render batch E2): the first
+     * [RenderService.publish] for this target could not resolve the live
+     * player (the channel started mid-tick and the service had no server
+     * binding yet, or the player was offline), so pairings for observers
+     * that already track the target have not been backfilled. Cleared once
+     * the sweep backfills; dropped with the state in
+     * [RenderService.clearTarget]/[RenderService.stop].
+     */
+    @JvmField var pairingBackfillPending: Boolean = false,
+    /**
      * Number of connections currently holding labels for this target.
      *
      * Atomic: mutated from the server main thread (tracking events, spawn,

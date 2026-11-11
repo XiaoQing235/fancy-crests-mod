@@ -156,16 +156,87 @@ internal class RenderService(initialSettings: RenderSettings) {
         if (target == null) {
             // New target: bind to the live entity id when available.
             val player = server?.playerList?.getPlayer(snapshot.target)
-            targets[snapshot.target] = TargetRenderState(
+            val fresh = TargetRenderState(
                 uuid = snapshot.target,
                 snapshot = snapshot,
                 currentEntityId = player?.id ?: -1,
             )
+            targets[snapshot.target] = fresh
             RenderDiagnostics.targets.incrementAndGet()
+            if (player != null) {
+                backfillPairings(fresh, player)
+            } else {
+                // The live player could not be resolved yet - the channel
+                // just started mid-tick (no server binding so far) or the
+                // target is offline. Observers that already track the
+                // target will never see a START_TRACKING for it, so the
+                // end-tick sweep must retry the backfill.
+                fresh.pairingBackfillPending = true
+            }
             return
         }
         target.snapshot = snapshot
         pushSnapshot(target)
+    }
+
+    /**
+     * Retro-pairing backfill for a freshly created [TargetRenderState]
+     * (render batch E2).
+     *
+     * Problem: observer->target pairings are normally built only by
+     * START_TRACKING. When the channel starts while players are already
+     * online (config `channels.headRender` false -> true + reload), every
+     * online player is a "new target" at its first publish, but no tracking
+     * event ever fires for pairs already inside tracking range: outbound
+     * interception immediately hides the vanilla name tags via virtual
+     * teams, yet no AddEntity for the label entities is ever sent, so every
+     * already-tracking observer sees a nameless player until they leave and
+     * re-enter tracking range or relog.
+     *
+     * Fix: when a target state is first created, run [spawnLabels] for every
+     * online observer allowed by [BackfillPolicy] (same dimension, never the
+     * target itself). spawnLabels is idempotent for existing pairings
+     * (early-exit + passenger re-merge only), so overlaps with tracking
+     * events that fire for the same pair are harmless.
+     *
+     * Design tradeoffs:
+     *  - Tracking range is not queryable from a server mod; the range
+     *    approximation is "same dimension". Over-sending to observers beyond
+     *    vanilla tracking range is accepted because the label entities carry
+     *    a view_range (RenderSettings.renderDistance) that culls them
+     *    client-side beyond that distance, and because the client ignores
+     *    SetPassengers for a vehicle id it does not know (verified 26.2
+     *    bytecode: warn + return; unknown passenger ids are skipped) - no
+     *    client state is corrupted. When such an observer really enters
+     *    tracking range later, START_TRACKING takes spawnLabels' early-exit
+     *    branch, which re-merges passengers onto the now-known vehicle: the
+     *    labels snap onto the player without a re-spawn.
+     *  - The residual gap is an observer within view range but beyond
+     *    tracking range seeing a static label at the target's backfill
+     *    position; bounded by renderDistance exceeding the (typically ~48
+     *    block) player tracking range, and self-corrects on the next
+     *    pairing-building event.
+     *  - Pairings created here for pairs without a vanilla tracking relation
+     *    receive no STOP_TRACKING when the observer leaves the dimension;
+     *    the end-tick world-generation sweep drops those stale-generation
+     *    observer states, and onTargetEntityReplaced / clearTarget / stop
+     *    sweep them like any other pairing.
+     */
+    private fun backfillPairings(target: TargetRenderState, player: ServerPlayer) {
+        if (!running) return
+        val server = this.server ?: return
+        val targetLevel = player.level()
+        for (observer in server.playerList.players) {
+            if (!BackfillPolicy.shouldBackfill(target.uuid, targetLevel, observer.uuid, observer.level())) continue
+            // The observer's connection may not be attached yet while the
+            // channel is starting (no end-tick has run); attaching here also
+            // flushes the one-shot virtual-team init, preserving the wire
+            // order "teams before label entities".
+            val state = attachConnection(observer.connection, flushInit = true)
+            synchronized(state.lock) {
+                spawnLabels(observer.connection, state, target, player)
+            }
+        }
     }
 
     fun clearTarget(targetUuid: UUID) {
@@ -496,7 +567,38 @@ internal class RenderService(initialSettings: RenderSettings) {
             } else if (state.lastSeenLevel !== level) {
                 state.lastSeenLevel = level
                 state.worldGeneration += 1
+                // The observer's client rebuilt its world around the level
+                // change. Vanilla stop events clean the pairings it knows
+                // about; retro-pairing states without a vanilla tracking
+                // relation (see backfillPairings) never receive one, so drop
+                // stale-generation states here - without delete packets, for
+                // the same reason as onObserverClientWorldReset: the client
+                // discarded these entities together with the old world.
+                synchronized(state.lock) {
+                    val entries = state.targets.entries.iterator()
+                    while (entries.hasNext()) {
+                        val obs = entries.next().value
+                        if (obs.worldGeneration != state.worldGeneration) {
+                            entries.remove()
+                            adjustRelation(targets[obs.targetUuid], -1)
+                        }
+                    }
+                }
             }
+        }
+
+        // Retro-pairing retry (render batch E2): target states whose first
+        // publish could not resolve the live player yet. Runs after the
+        // world-generation bump so pairings created here carry the current
+        // generation. Offline targets stay pending: their join is covered by
+        // tracking events, and the first end-tick after join backfills the
+        // remaining same-dimension observers (idempotent for pairs that
+        // tracking events already built).
+        for ((uuid, target) in targets) {
+            if (!target.pairingBackfillPending) continue
+            val player = server.playerList.getPlayer(uuid) ?: continue
+            target.pairingBackfillPending = false
+            backfillPairings(target, player)
         }
 
         // Target polls: entity id refresh, sneak state, real passengers.
