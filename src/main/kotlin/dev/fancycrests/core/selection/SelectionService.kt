@@ -52,6 +52,15 @@ enum class RejectionReason {
     PLAYER_OFFLINE,
 
     /**
+     * The configuration subsystem is in protection mode (no valid
+     * configuration could be loaded at startup, not even the last-known-good
+     * copy). Every state-changing operation is refused and revalidation
+     * defers, so persisted equipment can never be unequipped against an
+     * accidentally empty catalog. Recovery: fix the file and reload/restart.
+     */
+    CONFIG_PROTECTED,
+
+    /**
      * The operation body crashed before delivering its own completion
      * (backend/listener/user-code exception caught by the queue guard) and
      * before anything was committed — pre-commit failures only: validation,
@@ -136,6 +145,12 @@ class SelectionService(
     private val catalog: CatalogService,
     private val permissions: PermissionManager,
     private val configProvider: () -> FancyCrestsConfig,
+    /**
+     * Config health gate (wired to ConfigService.protectionActive by the
+     * integration layer). False = protection mode: state changes are
+     * rejected and revalidation defers, never unequipping equipment.
+     */
+    private val configHealthy: () -> Boolean = { true },
     private val eventBus: TitleEventBus,
     private val publisher: SnapshotPublisher,
     initialStates: Map<UUID, PlayerTitleState>,

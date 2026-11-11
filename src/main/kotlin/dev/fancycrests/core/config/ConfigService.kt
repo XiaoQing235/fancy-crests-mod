@@ -26,12 +26,40 @@ import java.util.regex.PatternSyntaxException
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
-/** Boolean channel switches; channels never implicitly enable each other. */
+/**
+ * One segment of a per-channel first-line template ([ChannelsConfig]).
+ * Mirrors [TemplateSegment] as raw configuration; consumers convert it when
+ * they build a channel's rendered first line.
+ */
+data class TemplateSegmentConfig(
+    val type: TemplateSegmentType,
+    /** Joins the items *within* the segment. */
+    val separator: String,
+    /** Optional legacy styling (& codes) for the separator component. */
+    val separatorStyle: String? = null,
+    /**
+     * Separator placed between this segment and the next non-empty one; null
+     * falls back to [separator] (the global-template behaviour).
+     */
+    val segmentSeparator: String? = null,
+)
+
+/**
+ * Boolean channel switches; channels never implicitly enable each other.
+ *
+ * The three optional per-channel templates override the global
+ * [FancyCrestsConfig.firstLineTemplate] for that channel only: null means
+ * "not configured" (fall back to the global template), an empty list means
+ * "configured empty" (that channel renders no first line at all).
+ */
 data class ChannelsConfig(
     val headRender: Boolean,
     val chat: Boolean,
     val tabList: Boolean,
     val placeholdersExport: Boolean,
+    val headRenderTemplate: List<TemplateSegmentConfig>? = null,
+    val chatTemplate: List<TemplateSegmentConfig>? = null,
+    val tabListTemplate: List<TemplateSegmentConfig>? = null,
 )
 
 /** Per-slot equip limits. */
@@ -487,6 +515,15 @@ class ConfigService(
             placeholdersExport = channelsObj.boolean(
                 "placeholdersExport", false, "channels.placeholdersExport", errors,
             ),
+            headRenderTemplate = channelsObj.optTemplate(
+                "headRenderTemplate", "channels.headRenderTemplate", errors,
+            ),
+            chatTemplate = channelsObj.optTemplate(
+                "chatTemplate", "channels.chatTemplate", errors,
+            ),
+            tabListTemplate = channelsObj.optTemplate(
+                "tabListTemplate", "channels.tabListTemplate", errors,
+            ),
         )
 
         val equipmentObj = root.optObject("equipment", "equipment", errors)
@@ -541,19 +578,7 @@ class ConfigService(
                 continue
             }
             val obj = element.asJsonObject
-            val typeText = obj.string("type", null, "$path.type", errors)
-            val type = when (typeText?.lowercase()?.trim()) {
-                "prefixes" -> TemplateSegmentType.PREFIXES
-                "name" -> TemplateSegmentType.NAME
-                "suffixes" -> TemplateSegmentType.SUFFIXES
-                "prefix" -> TemplateSegmentType.PREFIXES // tolerated spelling
-                "suffix" -> TemplateSegmentType.SUFFIXES
-                null -> null
-                else -> {
-                    errors += ConfigError("$path.type", "must be one of prefixes|name|suffixes (was '$typeText')")
-                    null
-                }
-            }
+            val type = segmentType(obj, path, errors)
             if (type != null) {
                 template += TemplateSegment(
                     type = type,
@@ -654,6 +679,68 @@ class ConfigService(
         if (element.isJsonObject) return element.asJsonObject
         errors += ConfigError(path, "must be an object")
         return JsonObject()
+    }
+
+    /**
+     * Parses one segment's `type`. Unknown spellings and missing values are
+     * errors with the exact path; the tolerated singular spellings
+     * ("prefix"/"suffix") stay accepted for backward compatibility.
+     */
+    private fun segmentType(obj: JsonObject, path: String, errors: MutableList<ConfigError>): TemplateSegmentType? {
+        val typeText = obj.string("type", null, "$path.type", errors)
+        return when (typeText?.lowercase()?.trim()) {
+            "prefixes", "prefix" -> TemplateSegmentType.PREFIXES
+            "name" -> TemplateSegmentType.NAME
+            "suffixes", "suffix" -> TemplateSegmentType.SUFFIXES
+            null -> {
+                errors += ConfigError("$path.type", "is required (must be prefixes|name|suffixes)")
+                null
+            }
+            else -> {
+                errors += ConfigError("$path.type", "must be prefixes|name|suffixes (was '$typeText')")
+                null
+            }
+        }
+    }
+
+    /**
+     * Parses an optional per-channel template. Absent member (or explicit
+     * null) yields null = "not configured, use the global template"; a
+     * present array is parsed element by element (an empty array is legal
+     * and means "this channel renders no first line").
+     */
+    private fun JsonObject.optTemplate(
+        member: String,
+        path: String,
+        errors: MutableList<ConfigError>,
+    ): List<TemplateSegmentConfig>? {
+        val element = get(member) ?: return null
+        if (element.isJsonNull) return null
+        if (!element.isJsonArray) {
+            errors += ConfigError(path, "must be an array of template segments")
+            return null
+        }
+        val segments = mutableListOf<TemplateSegmentConfig>()
+        for ((index, entry) in element.asJsonArray.withIndex()) {
+            val entryPath = "$path[$index]"
+            if (!entry.isJsonObject) {
+                errors += ConfigError(entryPath, "must be an object")
+                continue
+            }
+            val obj = entry.asJsonObject
+            val type = segmentType(obj, entryPath, errors)
+            if (type != null) {
+                segments += TemplateSegmentConfig(
+                    type = type,
+                    separator = obj.string("separator", " ", "$entryPath.separator", errors) ?: " ",
+                    separatorStyle = obj.string("separatorStyle", null, "$entryPath.separatorStyle", errors),
+                    segmentSeparator = obj.string(
+                        "segmentSeparator", null, "$entryPath.segmentSeparator", errors,
+                    )?.takeIf { it.isNotEmpty() },
+                )
+            }
+        }
+        return segments
     }
 
     private fun JsonObject.optArray(member: String, path: String, errors: MutableList<ConfigError>): JsonArray {
@@ -758,6 +845,9 @@ class ConfigService(
         channels.addProperty("chat", config.channels.chat)
         channels.addProperty("tabList", config.channels.tabList)
         channels.addProperty("placeholdersExport", config.channels.placeholdersExport)
+        config.channels.headRenderTemplate?.let { channels.add("headRenderTemplate", templateConfigJson(it)) }
+        config.channels.chatTemplate?.let { channels.add("chatTemplate", templateConfigJson(it)) }
+        config.channels.tabListTemplate?.let { channels.add("tabListTemplate", templateConfigJson(it)) }
         root.add("channels", channels)
 
         val equipment = JsonObject()
@@ -807,6 +897,20 @@ class ConfigService(
             addProperty("x", offset.x)
             addProperty("y", offset.y)
             addProperty("z", offset.z)
+        }
+
+    private fun templateConfigJson(segments: List<TemplateSegmentConfig>): JsonArray =
+        JsonArray().apply {
+            for (segment in segments) {
+                add(
+                    JsonObject().apply {
+                        addProperty("type", segment.type.name.lowercase())
+                        addProperty("separator", segment.separator)
+                        segment.separatorStyle?.let { addProperty("separatorStyle", it) }
+                        segment.segmentSeparator?.let { addProperty("segmentSeparator", it) }
+                    },
+                )
+            }
         }
 }
 
