@@ -233,6 +233,20 @@ class SelectionService(
     private fun canModifyEquipment(uuid: UUID): Boolean =
         permissions.check(uuid, Permissions.EQUIP) == PermissionVerdict.ALLOW
 
+    /**
+     * Rejection used by every state-changing operation while the config
+     * subsystem is in protection mode. Null when healthy (fast path).
+     */
+    private fun configProtected(): SelectionResult.Rejected? =
+        if (configHealthy()) {
+            null
+        } else {
+            SelectionResult.Rejected(
+                RejectionReason.CONFIG_PROTECTED,
+                "no valid configuration could be loaded; title state changes are disabled until it is fixed and reloaded",
+            )
+        }
+
     // ----------------------------------------------------------------------
     // Equip / unequip
     // ----------------------------------------------------------------------
@@ -254,6 +268,10 @@ class SelectionService(
         callback: (SelectionResult) -> Unit,
     ) {
         val deliver = deliverOnce(callback)
+        configProtected()?.let {
+            deliver(it)
+            return
+        }
         submit(uuid, crashCompletion(deliver)) { done ->
             if (!canModifyEquipment(uuid)) {
                 deliver(
@@ -338,6 +356,10 @@ class SelectionService(
     /** Removes one or all titles of [slot], preserving the order of the rest. */
     fun unequip(uuid: UUID, slot: TitleSlot, target: UnequipTarget, reason: String, callback: (SelectionResult) -> Unit) {
         val deliver = deliverOnce(callback)
+        configProtected()?.let {
+            deliver(it)
+            return
+        }
         submit(uuid, crashCompletion(deliver)) { done ->
             if (!canModifyEquipment(uuid)) {
                 deliver(
@@ -402,6 +424,10 @@ class SelectionService(
     /** Sets the nickname ([text] non-null) or resets it (null). Display-only. */
     fun setNickname(uuid: UUID, text: String?, reason: String, callback: (SelectionResult) -> Unit) {
         val deliver = deliverOnce(callback)
+        configProtected()?.let {
+            deliver(it)
+            return
+        }
         submit(uuid, crashCompletion(deliver)) { done ->
             val current = stateOf(uuid)
             if (text == null) {
@@ -545,6 +571,10 @@ class SelectionService(
     /** Grants a title (source "local" for admin commands). */
     fun grant(uuid: UUID, titleId: TitleId, source: String, reason: String, callback: (SelectionResult) -> Unit) {
         val deliver = deliverOnce(callback)
+        configProtected()?.let {
+            deliver(it)
+            return
+        }
         submit(uuid, crashCompletion(deliver)) { done ->
             if (catalog.get(titleId) == null) {
                 deliver(SelectionResult.Rejected(RejectionReason.TITLE_NOT_FOUND, "unknown title '$titleId'"))
@@ -609,6 +639,10 @@ class SelectionService(
     /** Revokes an ownership grant and rechecks equipped titles afterwards. */
     fun revoke(uuid: UUID, titleId: TitleId, source: String, reason: String, callback: (SelectionResult) -> Unit) {
         val deliver = deliverOnce(callback)
+        configProtected()?.let {
+            deliver(it)
+            return
+        }
         submit(uuid, crashCompletion(deliver)) { done ->
             val operationId = eventBus.newOperationId()
             val current = stateOf(uuid)
@@ -679,6 +713,15 @@ class SelectionService(
      */
     fun revalidatePlayer(uuid: UUID, reason: String, callback: (SelectionResult) -> Unit) {
         val deliver = deliverOnce(callback)
+        // Config protection comes first and defers unconditionally: with no
+        // valid configuration there is no catalog to validate against, and
+        // running the recheck anyway would unequip every title against the
+        // empty default catalog and persist that data loss. Same defer
+        // shape as the backend-not-ready case below.
+        if (!configHealthy()) {
+            deferForProtection(uuid, deliver)
+            return
+        }
         // A backend that cannot answer yet (external provider still loading
         // the user) must not turn interim UNDEFINED verdicts into a persisted
         // unequip: defer entirely and let the backend's own readiness event
@@ -688,6 +731,14 @@ class SelectionService(
             return
         }
         submit(uuid, crashCompletion(deliver)) { done ->
+            // Protection is also re-checked at execution time, mirroring the
+            // readiness re-check below: while this operation waited in the
+            // queue the world may have changed.
+            if (!configHealthy()) {
+                deferForProtection(uuid, deliver)
+                done()
+                return@submit
+            }
             // Readiness is also re-checked at execution time: while this
             // operation waited in the queue, the backend data may have been
             // unloaded (audit #3), and executing anyway would again persist
@@ -743,6 +794,20 @@ class SelectionService(
                 done = done,
             )
         }
+    }
+
+    /**
+     * Defers a revalidation while the configuration subsystem is in
+     * protection mode: reports success without touching any state — the
+     * operationId "config-protection" marks the defer, mirroring the
+     * backend-not-ready defer ("deferred"). Equipment is never removed; the
+     * config replacement cascade (fix + reload/restart) re-drives the real
+     * recheck once a valid configuration is active.
+     */
+    private fun deferForProtection(uuid: UUID, callback: (SelectionResult) -> Unit) {
+        permissions.warmUp(uuid)
+        val revision = stateOf(uuid).revision
+        callback(SelectionResult.Success("config-protection", revision, revision))
     }
 
     /**

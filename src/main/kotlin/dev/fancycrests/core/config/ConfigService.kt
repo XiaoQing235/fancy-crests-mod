@@ -210,10 +210,47 @@ private const val RESERVED_TITLE_ALL = "all"
 
 /** Result of a config load or reload attempt. */
 sealed interface ConfigLoadResult {
-    data class Success(val config: FancyCrestsConfig) : ConfigLoadResult
+    /**
+     * @param state which source the config came from. Only [LoadState.OK]
+     *   means "the regular config file". A reload always produces OK (it
+     *   reads the regular file); startup may fall back to the last-good
+     *   copy.
+     */
+    data class Success(
+        val config: FancyCrestsConfig,
+        val state: LoadState = LoadState.OK,
+    ) : ConfigLoadResult
 
     /** The previous configuration stayed active. */
     data class Failure(val errors: List<ConfigError>) : ConfigLoadResult
+}
+
+/**
+ * Outcome of the startup load (see ConfigService.loadOrCreate).
+ *
+ * Protection mode is decided by the *load state* only: a config that is
+ * valid but intentionally minimal (`titles: []`) runs normally (equipment
+ * rules follow the documented revalidation semantics); PROTECTED means no
+ * valid configuration existed at all, so state changes are disabled until
+ * one is available.
+ */
+enum class LoadState {
+    /** The regular config file loaded and validated. */
+    OK,
+
+    /**
+     * The regular config file was invalid; the last-known-good copy loaded
+     * instead. Fully functional; the admin should fix the main file.
+     */
+    FALLBACK_LAST_GOOD,
+
+    /**
+     * Neither the config file nor the last-good copy produced a valid
+     * configuration. No valid config exists: callers must refuse state
+     * changes (nothing may be unequipped or written against an unknown
+     * catalog).
+     */
+    PROTECTED,
 }
 
 /**
@@ -239,12 +276,29 @@ class ConfigService(
     @Volatile
     private var currentConfig: FancyCrestsConfig = DefaultConfig.create()
 
+    @Volatile
+    private var currentState: LoadState = LoadState.OK
+
     private val replaceListeners = mutableListOf<(FancyCrestsConfig) -> Unit>()
 
     val current: FancyCrestsConfig get() = currentConfig
 
     /** Bumped only on successful replacement; used to invalidate stale operations. */
     val version: Long get() = versionCounter.get()
+
+    /** How the active configuration was obtained (startup protection semantics). */
+    val loadState: LoadState get() = currentState
+
+    /**
+     * True while no valid configuration exists ([LoadState.PROTECTED]).
+     * Wire this to SelectionService's configHealthy gate: all state changes
+     * must be refused so persisted equipment is never unequipped against an
+     * unknown catalog.
+     */
+    val protectionActive: Boolean get() = currentState == LoadState.PROTECTED
+
+    /** Companion copy of the config file, updated after every successful full validation. */
+    val lastGoodPath: Path = configFile.resolveSibling(configFile.fileName.toString() + ".last-good")
 
     fun addOnReplaced(listener: (FancyCrestsConfig) -> Unit) {
         synchronized(replaceListeners) { replaceListeners.add(listener) }
@@ -254,26 +308,78 @@ class ConfigService(
      * Initial synchronous load, called once on server start. Creates and
      * persists safe defaults when the file is missing; the server always
      * starts with a valid configuration.
+     *
+     * Startup failure protection: when an existing file fails to parse or
+     * validate, the last-known-good copy is tried before anything else. If
+     * that copy is usable the server runs on it ([LoadState.FALLBACK_LAST_GOOD],
+     * loud warning, fully functional). Only when no valid configuration
+     * exists at all does the service enter [LoadState.PROTECTED]: the
+     * in-memory config is irrelevant then — callers must refuse state
+     * changes (see [protectionActive]) because running with implicit empty
+     * defaults would unequip every player's titles on their next login and
+     * persist that data loss.
      */
     fun loadOrCreate(): ConfigLoadResult {
         if (!Files.isRegularFile(configFile)) {
             val defaults = DefaultConfig.create()
             writeDefaults(defaults)
             applyNewConfig(defaults)
+            currentState = LoadState.OK
             return ConfigLoadResult.Success(defaults)
         }
-        val result = readParseAndValidate()
+        val result = readParseAndValidate(configFile)
         if (result is ConfigLoadResult.Success) {
             applyNewConfig(result.config)
+            currentState = LoadState.OK
+            persistLastGood()
+            return result
         }
+        val errors = (result as ConfigLoadResult.Failure).errors
+        logger.error(
+            "Configuration invalid ({}). Errors: {}",
+            configFile,
+            errors.joinToString("; "),
+        )
+        val fallback = readParseAndValidate(lastGoodPath)
+        if (fallback is ConfigLoadResult.Success) {
+            logger.warn(
+                "Falling back to the last-known-good configuration {} ({} titles). " +
+                    "Fix the main configuration file; the last-good copy is only a safety net.",
+                lastGoodPath,
+                fallback.config.titles.size,
+            )
+            applyNewConfig(fallback.config)
+            currentState = LoadState.FALLBACK_LAST_GOOD
+            return ConfigLoadResult.Success(fallback.config, LoadState.FALLBACK_LAST_GOOD)
+        }
+        logger.error(
+            "No valid configuration available (config file and last-good copy both unusable). " +
+                "Entering PROTECTED mode: all title state changes are disabled until a valid " +
+                "configuration is loaded. Fix '{}' and restart (or /fancycrests reload). " +
+                "Last-good problems: {}",
+            configFile,
+            if (fallback is ConfigLoadResult.Failure) {
+                fallback.errors.joinToString("; ")
+            } else {
+                "unknown"
+            },
+        )
+        currentState = LoadState.PROTECTED
         return result
     }
 
-    /** Hot reload: background read + parse, main-thread validation and swap. */
+    /**
+     * Hot reload: background read + parse, main-thread validation and swap.
+     * A failed reload keeps the previous configuration (and load state)
+     * active — entering protection on a failed hot reload would lock out
+     * the very admin command that fixes it. A successful reload is also the
+     * recovery path out of FALLBACK_LAST_GOOD/PROTECTED and refreshes the
+     * last-good copy.
+     */
     fun reloadAsync(callback: (ConfigLoadResult) -> Unit) {
         ioExecutor.execute {
             val read = try {
-                readParseAndValidate()
+                readParseAndValidate(configFile)
             } catch (t: Throwable) {
                 logger.error("Config reload failed unexpectedly", t)
                 ConfigLoadResult.Failure(
@@ -285,6 +391,8 @@ class ConfigService(
                 try {
                     if (read is ConfigLoadResult.Success) {
                         applyNewConfig(read.config)
+                        currentState = LoadState.OK
+                        persistLastGood()
                         final = read
                     }
                 } catch (t: Throwable) {
@@ -304,7 +412,7 @@ class ConfigService(
     /** Validates the file on disk without replacing the active config. */
     fun validateFileAsync(callback: (List<ConfigError>) -> Unit) {
         ioExecutor.execute {
-            val errors = when (val result = readParseAndValidate()) {
+            val errors = when (val result = readParseAndValidate(configFile)) {
                 is ConfigLoadResult.Success -> emptyList()
                 is ConfigLoadResult.Failure -> result.errors
             }
@@ -320,21 +428,21 @@ class ConfigService(
     // Pipeline internals
     // ------------------------------------------------------------------
 
-    private fun readParseAndValidate(): ConfigLoadResult {
-        if (!Files.isRegularFile(configFile)) {
+    private fun readParseAndValidate(file: Path): ConfigLoadResult {
+        if (!Files.isRegularFile(file)) {
             return ConfigLoadResult.Failure(
-                listOf(ConfigError(configFile.toString(), "configuration file is missing")),
+                listOf(ConfigError(file.toString(), "configuration file is missing")),
             )
         }
         val root = try {
-            JsonParser.parseString(Files.readString(configFile, StandardCharsets.UTF_8))
+            JsonParser.parseString(Files.readString(file, StandardCharsets.UTF_8))
         } catch (e: JsonParseException) {
             return ConfigLoadResult.Failure(
                 listOf(ConfigError("$", "invalid JSON: ${e.message ?: e.javaClass.simpleName}")),
             )
         } catch (e: Exception) {
             return ConfigLoadResult.Failure(
-                listOf(ConfigError(configFile.toString(), "cannot read file: ${e.message}")),
+                listOf(ConfigError(file.toString(), "cannot read file: ${e.message}")),
             )
         }
         if (!root.isJsonObject) {
@@ -384,6 +492,33 @@ class ConfigService(
             }
         } catch (e: Exception) {
             // Best effort: the server still runs with in-memory defaults.
+        }
+    }
+
+    /**
+     * Atomically refreshes the last-good copy from the config file that just
+     * passed full validation (write temp + move, so a crash mid-write can
+     * never leave a half-written copy). A damaged or missing copy must never
+     * take the server down — failures are logged and ignored; the previous
+     * copy simply stays as it was.
+     */
+    private fun persistLastGood() {
+        try {
+            val parent = lastGoodPath.toAbsolutePath().parent
+            if (parent != null) Files.createDirectories(parent)
+            val temp = lastGoodPath.resolveSibling(lastGoodPath.fileName.toString() + ".tmp")
+            Files.copy(configFile, temp, StandardCopyOption.REPLACE_EXISTING)
+            try {
+                Files.move(temp, lastGoodPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            } catch (e: Exception) {
+                Files.move(temp, lastGoodPath, StandardCopyOption.REPLACE_EXISTING)
+            }
+        } catch (e: Exception) {
+            logger.warn(
+                "Could not refresh the last-known-good configuration copy {}; keeping the previous one",
+                lastGoodPath,
+                e,
+            )
         }
     }
 
