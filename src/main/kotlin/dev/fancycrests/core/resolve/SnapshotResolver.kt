@@ -12,6 +12,8 @@ import dev.fancycrests.core.config.FancyCrestsConfig
 import dev.fancycrests.core.config.LegacyTextParser
 import dev.fancycrests.core.config.SecondLineRuleConfig
 import dev.fancycrests.core.config.TemplateSegment
+import dev.fancycrests.core.config.TemplateSegmentConfig
+import dev.fancycrests.core.config.TemplateSegmentType
 import dev.fancycrests.core.permission.PermissionManager
 import dev.fancycrests.core.refresh.PlaceholderServiceImpl
 import dev.fancycrests.core.refresh.TemplateEngine
@@ -66,10 +68,40 @@ class SnapshotResolver(
     private val templateEngine: TemplateEngine = TemplateEngine(PlaceholderServiceImpl()),
 ) {
 
-    fun resolve(state: PlayerTitleState, profileName: String, dimensionKey: String?): ResolvedDisplay {
+    fun resolve(state: PlayerTitleState, profileName: String, dimensionKey: String?): ResolvedDisplay =
+        resolveFor(channelTemplate = null, state = state, profileName = profileName, dimensionKey = dimensionKey)
+
+    /**
+     * Channel-aware resolution (review IV): [channelTemplate] overrides the
+     * global `firstLineTemplate` for one export channel.
+     *
+     *  - `null` = not configured → the global template is used (identical
+     *    to [resolve]);
+     *  - an **empty list** = configured empty → the first line is an empty
+     *    component: the head channel renders an empty first line (only the
+     *    second line, if any, shows), while the chat and tab channels treat
+     *    the null-vs-empty distinction upstream (vanilla sender name / no
+     *    tab override);
+     *  - a non-empty list → rendered with the same rules as the global
+     *    template, plus the per-segment [TemplateSegmentConfig.segmentSeparator]:
+     *    separators **between segments** use `segmentSeparator ?: separator`
+     *    of the *preceding* segment, separators **between titles inside one
+     *    segment** always use that segment's `separator` (the global
+     *    [TemplateSegment] has no `segmentSeparator`, so its inter-segment
+     *    behaviour is unchanged).
+     */
+    fun resolveFor(
+        channelTemplate: List<TemplateSegmentConfig>?,
+        state: PlayerTitleState,
+        profileName: String,
+        dimensionKey: String?,
+    ): ResolvedDisplay {
         val config = configProvider()
         val effectiveName = state.nickname ?: profileName
-        val firstLine = buildFirstLine(config.firstLineTemplate, state, catalog, effectiveName)
+        val firstLine = when (channelTemplate) {
+            null -> buildFirstLine(config.firstLineTemplate, state, catalog, effectiveName)
+            else -> buildFirstLineFromConfig(channelTemplate, state, catalog, effectiveName)
+        }
         val secondLine = matchSecondLine(config.sortedSecondLineRules(), state.uuid, dimensionKey)
         return ResolvedDisplay(
             firstLine = firstLine,
@@ -99,24 +131,67 @@ class SnapshotResolver(
 
     private data class RenderedSegment(val component: Component, val separator: Component?)
 
+    /** Unified per-segment separator pair: within the segment / after it. */
+    private data class SegmentSpec(
+        val type: TemplateSegmentType,
+        /** Joins the items (titles) *within* the segment. */
+        val within: Component?,
+        /** Placed between this segment and the next non-empty one. */
+        val between: Component?,
+    )
+
     internal fun buildFirstLine(
         template: List<TemplateSegment>,
         state: PlayerTitleState,
         catalog: CatalogService,
         effectiveName: String,
+    ): Component = buildFirstLineFromSpecs(
+        template.map { segment ->
+            val within = separatorComponent(segment.separator, segment.separatorStyle)
+            // Global segments have no dedicated inter-segment separator:
+            // the within-segment separator is reused (legacy behaviour).
+            SegmentSpec(segment.type, within, within)
+        },
+        state,
+        catalog,
+        effectiveName,
+    )
+
+    /** Channel-override variant of [buildFirstLine] (see [resolveFor]). */
+    internal fun buildFirstLineFromConfig(
+        template: List<TemplateSegmentConfig>,
+        state: PlayerTitleState,
+        catalog: CatalogService,
+        effectiveName: String,
+    ): Component = buildFirstLineFromSpecs(
+        template.map { segment ->
+            val within = separatorComponent(segment.separator, segment.separatorStyle)
+            val between = separatorComponent(segment.segmentSeparator ?: segment.separator, segment.separatorStyle)
+            SegmentSpec(segment.type, within, between)
+        },
+        state,
+        catalog,
+        effectiveName,
+    )
+
+    private fun buildFirstLineFromSpecs(
+        specs: List<SegmentSpec>,
+        state: PlayerTitleState,
+        catalog: CatalogService,
+        effectiveName: String,
     ): Component {
         val rendered = mutableListOf<RenderedSegment>()
-        for (segment in template) {
-            val items: List<Component> = when (segment.type) {
-                dev.fancycrests.core.config.TemplateSegmentType.PREFIXES ->
+        for (spec in specs) {
+            val items: List<Component> = when (spec.type) {
+                TemplateSegmentType.PREFIXES ->
                     equippedTexts(state.prefixes, catalog)
-                dev.fancycrests.core.config.TemplateSegmentType.NAME ->
+                TemplateSegmentType.NAME ->
                     // The effective name may be a nickname carrying legacy
                     // colour codes; parse them instead of printing the codes
                     // as plain text (audit #10). Code-free profile names
                     // parse to the identical literal component.
                     listOf(LegacyTextParser.parse(effectiveName))
-                dev.fancycrests.core.config.TemplateSegmentType.SUFFIXES ->
+                TemplateSegmentType.SUFFIXES ->
                     equippedTexts(state.suffixes, catalog)
             }
             if (items.isEmpty()) continue
@@ -124,11 +199,11 @@ class SnapshotResolver(
             val joined = Component.empty()
             items.forEachIndexed { index, item ->
                 if (index > 0) {
-                    separatorComponent(segment)?.let { joined.append(it) }
+                    spec.within?.let { joined.append(it) }
                 }
                 joined.append(item)
             }
-            rendered += RenderedSegment(joined, separatorComponent(segment))
+            rendered += RenderedSegment(joined, spec.between)
         }
 
         val root = Component.empty()
@@ -147,11 +222,11 @@ class SnapshotResolver(
     private fun equippedTexts(ids: List<TitleId>, catalog: CatalogService): List<Component> =
         ids.mapNotNull { id -> catalog.get(id)?.text?.copy() }
 
-    /** The separator component of a segment, or null for an empty separator string. */
-    private fun separatorComponent(segment: TemplateSegment): Component? {
-        if (segment.separator.isEmpty()) return null
-        val stylePrefix = segment.separatorStyle ?: return Component.literal(segment.separator)
-        return LegacyTextParser.parse(stylePrefix + segment.separator)
+    /** The separator component for [text], or null for an empty separator string. */
+    private fun separatorComponent(text: String, style: String?): Component? {
+        if (text.isEmpty()) return null
+        if (style == null) return Component.literal(text)
+        return LegacyTextParser.parse(style + text)
     }
 
     // ------------------------------------------------------------------
@@ -211,13 +286,23 @@ class SnapshotPublisher(
     /**
      * Resolves and publishes the current snapshot of [state]. Called on the
      * main thread after every committed state change or recheck.
+     *
+     * The head channel resolves with `channels.headRenderTemplate` when
+     * configured (null = global template; an explicitly empty list renders
+     * an empty first line, review IV — the snapshot is still published so
+     * the render layer swaps the previous text for the empty one).
      */
     fun publish(state: PlayerTitleState) {
         val profileName = currentProfileName(state.uuid)
         // Stage the view first so placeholder resolvers (nickname/prefix/
         // suffix) read the fresh immutable state during the resolve below.
         views[state.uuid] = PublishedPlayerView(state.uuid, profileName, state, views[state.uuid]?.snapshot)
-        val resolved = resolver.resolve(state, profileName, adapter.dimensionKey(state.uuid))
+        val resolved = resolver.resolveFor(
+            configProvider().channels.headRenderTemplate,
+            state,
+            profileName,
+            adapter.dimensionKey(state.uuid),
+        )
         publishResolved(state.uuid, profileName, state, resolved)
     }
 
@@ -225,12 +310,18 @@ class SnapshotPublisher(
      * Periodic re-resolution used by the refresh scheduler: resolves the
      * current state and publishes only when the resolved content actually
      * changed (first line, second line or matched rule). Returns true when a
-     * new snapshot was published.
+     * new snapshot was published. Resolves through the head channel's
+     * template override like [publish].
      */
     fun publishIfChanged(state: PlayerTitleState): Boolean {
         val profileName = currentProfileName(state.uuid)
         views[state.uuid] = PublishedPlayerView(state.uuid, profileName, state, views[state.uuid]?.snapshot)
-        val resolved = resolver.resolve(state, profileName, adapter.dimensionKey(state.uuid))
+        val resolved = resolver.resolveFor(
+            configProvider().channels.headRenderTemplate,
+            state,
+            profileName,
+            adapter.dimensionKey(state.uuid),
+        )
         val previous = views[state.uuid]?.snapshot
         if (previous != null &&
             previous.firstLine == resolved.firstLine &&

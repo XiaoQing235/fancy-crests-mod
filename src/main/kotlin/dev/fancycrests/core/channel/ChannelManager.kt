@@ -2,6 +2,8 @@ package dev.fancycrests.core.channel
 
 import dev.fancycrests.api.PlayerTitleState
 import dev.fancycrests.core.ServerAdapter
+import dev.fancycrests.core.config.FancyCrestsConfig
+import dev.fancycrests.core.config.TemplateSegmentConfig
 import dev.fancycrests.core.event.TitleChangeEventPost
 import dev.fancycrests.core.event.TitleEventBus
 import dev.fancycrests.core.resolve.SnapshotPublisher
@@ -36,11 +38,20 @@ class ChannelManager(
      */
     private val publisher: SnapshotPublisher? = null,
 ) {
-    private val chat = ChatChannel(::freshFirstLine)
-    private val tab = TabListChannel(adapter, ::freshFirstLine)
+    private val chat = ChatChannel(::freshChatFirstLine)
+    private val tab = TabListChannel(adapter, ::freshTabFirstLine)
 
     /** Deactivates the forwarded dimension hook after [stop] (audit II-5). */
     private val active = AtomicBoolean(true)
+
+    /**
+     * The configuration of the last [apply] (server start or config
+     * replacement); supplies the per-channel template overrides of review
+     * IV. Null before the first apply — fresh resolves then use the global
+     * template only ([resolveFor] with null).
+     */
+    @Volatile
+    private var appliedConfig: FancyCrestsConfig? = null
 
     init {
         // First-line changes are event-driven; refresh the tab override so
@@ -57,6 +68,9 @@ class ChannelManager(
 
     /** Applies the channel switches of [config]; idempotent. Main thread. */
     fun apply(config: dev.fancycrests.core.config.FancyCrestsConfig) {
+        // Template overrides first: the enables/reapplies below resolve with
+        // the freshly applied per-channel templates (review IV).
+        appliedConfig = config
         if (config.channels.chat) chat.enable() else chat.disable()
         if (config.channels.tabList) {
             if (tab.enabled) {
@@ -122,15 +136,37 @@ class ChannelManager(
     }
 
     /**
-     * Freshly resolves the first line for [uuid], or null when the player has
-     * no fancy content (no equipped titles and no nickname) — vanilla display
-     * stays untouched in that case.
+     * Freshly resolves the chat sender decoration for [uuid] through
+     * `channels.chatTemplate` (review IV):
+     *  - null template → global first line;
+     *  - empty template → null → the chat channel passes the message through
+     *    with the vanilla sender name (no cancel-and-replay);
+     *  - null without fancy content (no titles, no nickname) → vanilla too.
      */
-    private fun freshFirstLine(uuid: UUID): Component? {
+    internal fun freshChatFirstLine(uuid: UUID): Component? =
+        freshFirstLine(uuid, appliedConfig?.channels?.chatTemplate)
+
+    /**
+     * Freshly resolves the tab-list display name for [uuid] through
+     * `channels.tabListTemplate` (review IV): null template → global first
+     * line; empty template → null → no tab override (an existing override is
+     * cleared by [TabListChannel.applyTo]).
+     */
+    internal fun freshTabFirstLine(uuid: UUID): Component? =
+        freshFirstLine(uuid, appliedConfig?.channels?.tabListTemplate)
+
+    /**
+     * Shared per-channel first-line resolution. [channelTemplate] null means
+     * "not configured" and falls back to the resolver's global template; an
+     * empty list means "configured empty" and yields null — the caller
+     * channels treat that as "render nothing / keep vanilla".
+     */
+    private fun freshFirstLine(uuid: UUID, channelTemplate: List<TemplateSegmentConfig>?): Component? {
         val state = stateOf(uuid)
         if (state.prefixes.isEmpty() && state.suffixes.isEmpty() && state.nickname == null) return null
+        if (channelTemplate != null && channelTemplate.isEmpty()) return null
         val profileName = adapter.profileName(uuid) ?: return null
-        val resolved = resolver.resolve(state, profileName, adapter.dimensionKey(uuid))
+        val resolved = resolver.resolveFor(channelTemplate, state, profileName, adapter.dimensionKey(uuid))
         return resolved.firstLine
     }
 }
