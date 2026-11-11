@@ -94,28 +94,19 @@ object CommandSupport {
      * name. Nicknames are never consulted; unresolvable input raises a
      * brigadier error.
      */
-    fun resolveTargetOrThrow(core: CoreServices, input: String): TargetResolution.Resolved {
-        val uuid = try {
-            java.util.UUID.fromString(input)
-        } catch (e: IllegalArgumentException) {
-            null
+    fun resolveTargetOrThrow(core: CoreServices, input: String): TargetResolution.Resolved =
+        when (
+            val lookup = targetLookup(
+                input = input,
+                profileNameForUuid = { core.serverAdapter.profileName(it) },
+                exactOnlineUuid = { core.serverAdapter.playerNameExact(it) },
+                knownUuidForLowercase = { core.serverAdapter.knownPlayerNames()[it.lowercase()] },
+            )
+        ) {
+            is TargetLookup.Hit -> lookup.resolved
+            TargetLookup.UnknownPlayer -> throw UNKNOWN_PLAYER.create(input)
+            TargetLookup.AmbiguousName -> throw AMBIGUOUS_PLAYER.create(input)
         }
-        if (uuid != null) {
-            val name = core.serverAdapter.profileName(uuid) ?: "unknown"
-            return TargetResolution.Resolved(uuid, name)
-        }
-        val byName = core.serverAdapter.playerNameExact(input)
-        if (byName == null) {
-            throw UNKNOWN_PLAYER.create(input)
-        }
-        // getPlayerByName matches exactly one online profile per name; the
-        // ambiguity guard exists for future multi-match resolvers.
-        val known = core.serverAdapter.knownPlayerNames()[input.lowercase()]
-        if (known != null && known != byName) {
-            throw AMBIGUOUS_PLAYER.create(input)
-        }
-        return TargetResolution.Resolved(byName, input)
-    }
 
     // ------------------------------------------------------------------
     // Feedback
@@ -168,6 +159,47 @@ internal fun permissionLevel(permissions: PermissionSet): Int = when {
     permissions == PermissionSet.ALL_PERMISSIONS -> 4
     permissions is LevelBasedPermissionSet -> permissions.level().id()
     else -> 0
+}
+
+/** Pure outcome of [targetLookup]; the failure variants map to brigadier errors. */
+internal sealed interface TargetLookup {
+    data class Hit(val resolved: TargetResolution.Resolved) : TargetLookup
+
+    /** No UUID and no exact online name matches the input. */
+    data object UnknownPlayer : TargetLookup
+
+    /** The known-name table disagrees with the exact match (future multi-match resolvers). */
+    data object AmbiguousName : TargetLookup
+}
+
+/**
+ * Pure target-resolution decision (unit-testable without a server):
+ * UUID input resolves directly (display name from the profile table,
+ * "unknown" when the profile is offline); otherwise only an exact
+ * (case-insensitive) online player name resolves — nicknames are never
+ * consulted — and a disagreement with the known-name table is reported
+ * as ambiguous instead of guessing.
+ */
+internal fun targetLookup(
+    input: String,
+    profileNameForUuid: (java.util.UUID) -> String?,
+    exactOnlineUuid: (String) -> java.util.UUID?,
+    knownUuidForLowercase: (String) -> java.util.UUID?,
+): TargetLookup {
+    val uuid = try {
+        java.util.UUID.fromString(input)
+    } catch (_: IllegalArgumentException) {
+        null
+    }
+    if (uuid != null) {
+        return TargetLookup.Hit(TargetResolution.Resolved(uuid, profileNameForUuid(uuid) ?: "unknown"))
+    }
+    val byName = exactOnlineUuid(input) ?: return TargetLookup.UnknownPlayer
+    val known = knownUuidForLowercase(input.lowercase())
+    if (known != null && known != byName) {
+        return TargetLookup.AmbiguousName
+    }
+    return TargetLookup.Hit(TargetResolution.Resolved(byName, input))
 }
 
 // Top-level feedback extensions (usable unqualified from the command tree).
