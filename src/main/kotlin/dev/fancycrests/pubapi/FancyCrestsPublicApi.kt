@@ -15,8 +15,11 @@ import dev.fancycrests.core.selection.Eligibility
 import dev.fancycrests.core.selection.SelectionResult
 import dev.fancycrests.core.selection.UnequipTarget
 import net.minecraft.network.chat.Component
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
@@ -232,8 +235,9 @@ class FancyCrestsPublicApi(
 
     /**
      * Subscribes to the cancellable pre-commit event. The listener runs on
-     * the main thread; a listener throwing aborts the operation (identical to
-     * core listener semantics). Returns a handle that unsubscribes.
+     * the main thread; a listener that throws cancels the operation (the
+     * core-bus equivalent semantics) while the remaining API listeners are
+     * still notified. Returns a handle that unsubscribes.
      */
     fun onPreChange(listener: (TitleChangePreEvent) -> Unit): AutoCloseable {
         preListeners.add(listener)
@@ -264,18 +268,41 @@ class FancyCrestsPublicApi(
 
     /**
      * One forwarder per bus, registered for the lifetime of the core services.
-     * Exceptions deliberately propagate: the core bus treats a throwing pre
-     * listener as "cancel the operation" and a throwing post listener is
-     * logged there, preserving core semantics for API listeners.
+     * Listener failures are isolated per API subscriber so one misbehaving
+     * integration cannot starve the others: a throwing pre listener cancels
+     * the operation (semantically what the core bus does with a throwing pre
+     * listener) and the forwarder continues with the remaining listeners; a
+     * throwing post listener is only rate-limited logged, and the state that
+     * was already committed stays committed. Either way the exception never
+     * propagates into the core bus.
      */
     private val preForwarder: (dev.fancycrests.core.event.TitleChangeEventPre) -> Unit = { event ->
         val wrapped = TitleChangePreEvent(event)
-        for (listener in preListeners) listener(wrapped)
+        for (listener in preListeners) {
+            try {
+                listener(wrapped)
+            } catch (t: Throwable) {
+                ForwarderLog.rateLimited("pre:${event.type}:${event.uuid}", t) {
+                    "Public API pre listener threw for ${event.type} ${event.uuid} (op ${event.operationId}); " +
+                        "cancelling operation and notifying remaining listeners"
+                }
+                wrapped.cancel()
+            }
+        }
     }
 
     private val postForwarder: (dev.fancycrests.core.event.TitleChangeEventPost) -> Unit = { event ->
         val wrapped = TitleChangePostEvent(event)
-        for (listener in postListeners) listener(wrapped)
+        for (listener in postListeners) {
+            try {
+                listener(wrapped)
+            } catch (t: Throwable) {
+                ForwarderLog.rateLimited("post:${event.type}:${event.uuid}", t) {
+                    "Public API post listener threw for ${event.type} ${event.uuid} (op ${event.operationId}); " +
+                        "state stays committed, notifying remaining listeners"
+                }
+            }
+        }
     }
 
     init {
@@ -319,5 +346,19 @@ class FancyCrestsPublicApi(
             }
         }
         return future
+    }
+}
+
+/** Key-limited logging for forwarder listener failures (mirrors the adapter's GuardedLog). */
+private object ForwarderLog {
+    private const val INTERVAL_MILLIS = 10_000L
+    private val logger: Logger = LoggerFactory.getLogger("FancyCrests/PublicApi")
+    private val lastLogAt = ConcurrentHashMap<String, Long>()
+
+    fun rateLimited(key: String, error: Throwable, message: () -> String) {
+        val now = System.currentTimeMillis()
+        val previous = lastLogAt.put(key, now)
+        if (previous != null && now - previous < INTERVAL_MILLIS) return
+        logger.warn("{} [throttled]", message(), error)
     }
 }
