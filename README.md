@@ -178,8 +178,25 @@ cd fancy-crests-mod
 ./gradlew build
 ```
 
-The jar is written to `build/libs/FancyCrests-<version>.jar`. `./gradlew runServer`
-starts a development server under `run/` (EULA acceptance included).
+The jar is written to `build/libs/FancyCrests-<version>.jar`.
+
+### Shared local test server
+
+Use `./gradlew runServer --console=plain` (Windows:
+`.\gradlew.bat runServer --console=plain`) for the shared development server. Loom's generated server IDE
+configuration uses the same `run/` working directory and the current project
+classes. Do not also copy a Fancy Crests jar into its `mods/` directory.
+
+Keep the existing shared world and configuration between test sessions. Stop the
+server with the console command `stop` and wait for shutdown before changing
+mods, backing up data, or starting it from another tool. Never run two instances
+against this directory. Back up the entire stopped server before an intentional
+reset; local backups belong in the ignored `run-backups/` directory.
+
+The locally configured test server has usage notes in `run/README.md`. Its
+configuration, player data, optional mods and control credentials are local only
+and are not distributed with the repository. On a new checkout, create your own
+server configuration and review the Minecraft EULA before accepting it.
 
 ## License
 

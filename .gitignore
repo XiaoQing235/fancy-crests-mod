@@ -25,6 +25,7 @@ bin/
 
 # fabric
 run/
+run-backups/
 logs/
 
 # kotlin

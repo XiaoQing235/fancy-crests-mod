@@ -29,11 +29,21 @@ repositories {
 }
 
 loom {
+	runs {
+		named("server") {
+			runDirectory.set(layout.projectDirectory.dir("run"))
+			generateRunConfig.set(true)
+		}
+	}
 	mods {
 		register("fancycrests") {
 			sourceSet(sourceSets.main.get())
 		}
 	}
+}
+
+tasks.named<JavaExec>("runServer") {
+	standardInput = System.`in`
 }
 
 dependencies {
