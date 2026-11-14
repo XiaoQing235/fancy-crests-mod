@@ -13,6 +13,7 @@ import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents
 import net.fabricmc.loader.api.FabricLoader
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+import java.util.UUID
 
 /**
  * Composition root of Fancy Crests (Custom Names).
@@ -36,6 +37,16 @@ object FancyCrestsMod : ModInitializer {
     /** Read-only access for other mods after SERVER_STARTED; null before. */
     @JvmStatic
     fun api(): FancyCrestsPublicApi? = publicApi
+
+    /** Called after the vanilla OP list changes. */
+    @JvmStatic
+    fun onOperatorChanged(uuid: UUID) {
+        try {
+            core?.onOperatorChanged(uuid)
+        } catch (e: Exception) {
+            LOGGER.error("Failed to recheck player after OP change", e)
+        }
+    }
 
     override fun onInitialize() {
         val loader = FabricLoader.getInstance()

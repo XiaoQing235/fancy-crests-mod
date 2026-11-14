@@ -152,7 +152,11 @@ class CoreServices(
         // ---- catalog & permissions -----------------------------------
         catalogService = CatalogService(initialConfig.toTitleDefinitions())
         builtInBackend = BuiltInBackend().apply { reload(initialConfig.permissions.nodes) }
-        permissionManager = PermissionManager(adapter, listOf(builtInBackend))
+        permissionManager = PermissionManager(adapter, listOf(builtInBackend)) { node ->
+            val config = configService.current
+            config.titles.any { it.permission == node } ||
+                config.secondLineRules.any { it.condition?.permission == node }
+        }
 
         // ---- events & resolution -------------------------------------
         eventBus = TitleEventBus(mainExecutor)
@@ -300,6 +304,12 @@ class CoreServices(
     fun onPlayerQuit(uuid: UUID) {
         selectionService.handlePlayerQuit(uuid)
         channelManager.onPlayerQuit(uuid)
+    }
+
+    /** Rechecks online equipment and display after vanilla changes OP status. */
+    fun onOperatorChanged(uuid: UUID) {
+        if (!started || uuid !in serverAdapter.onlinePlayerUuids()) return
+        permissionManager.recheckNow(uuid)
     }
 
     /** Diagnostics snapshot for /fancycrests diagnose. */

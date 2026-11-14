@@ -42,6 +42,9 @@ interface ServerAdapter {
      */
     fun operatorLevel(uuid: UUID): Int
 
+    /** Whether vanilla considers this player an operator, including singleplayer owners. */
+    fun isOperator(uuid: UUID): Boolean
+
     /**
      * Dimension key of the player's current level (for example
      * "minecraft:the_nether"), or null when offline.
@@ -146,6 +149,13 @@ class MinecraftServerAdapter(private val server: net.minecraft.server.MinecraftS
                 permissions.level().id()
             else -> 0
         }
+    }
+
+    override fun isOperator(uuid: UUID): Boolean {
+        val player = server.playerList.getPlayer(uuid)
+        val owner = server.singleplayerProfile?.takeIf { it.id() == uuid }
+        val name = player?.gameProfile?.name() ?: owner?.name() ?: ""
+        return server.playerList.isOp(net.minecraft.server.players.NameAndId(uuid, name))
     }
 
     override fun dimensionKey(uuid: UUID): String? {

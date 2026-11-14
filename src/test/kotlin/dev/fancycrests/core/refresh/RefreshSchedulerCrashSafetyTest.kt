@@ -54,6 +54,7 @@ class RefreshSchedulerCrashSafetyTest {
         override fun profileName(uuid: UUID): String? = "Player-$uuid"
         override fun playerNameExact(name: String): UUID? = null
         override fun operatorLevel(uuid: UUID): Int = 0
+        override fun isOperator(uuid: UUID): Boolean = false
         override fun dimensionKey(uuid: UUID): String? = "minecraft:overworld"
         override fun knownPlayerNames(): Map<String, UUID> = emptyMap()
         override fun sendSystemMessage(uuid: UUID, message: Component) = Unit

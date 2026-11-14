@@ -70,14 +70,14 @@ data class NodeDefaultPolicy(
  *
  *  - `fancycrests.menu`                → ALLOW_ALL (normal players can open the menu)
  *  - `fancycrests.equip`               → ALLOW_ALL (equip/unequip own titles)
- *  - `fancycrests.nickname.set`        → DENY_ALL (must be explicitly granted)
- *  - `fancycrests.nickname.bypass_reserved` → DENY_ALL (admin-granted only)
- *  - `fancycrests.admin.*`             → OP_LEVEL 2 (vanilla gamemaster/admin)
+ *  - `fancycrests.nickname.set` and `fancycrests.nickname.bypass_reserved`
+ *    → DENY_ALL for non-operators unless explicitly granted
+ *  - `fancycrests.admin.*` → OP_LEVEL 2 for non-player sources
  *
  * An explicit deny can never be overridden by the operator fallback: the
  * evaluation order in [PermissionManager] checks deny before allow before
- * default. Custom (unknown) nodes default to DENY_ALL — UNDEFINED is never
- * returned for a node that has a policy entry, and all standard nodes do.
+ * the operator fallback and default. Unknown nodes return UNDEFINED when no
+ * backend has an opinion and they are not configured for this mod.
  */
 object NodeDefaults {
     const val ADMIN_OP_LEVEL = 2
@@ -143,8 +143,8 @@ class BuiltInBackend : PermissionBackend {
 /**
  * Permission resolution implementing [PermissionService].
  *
- * Evaluation order per node (plan chapter 1): explicit deny → explicit allow →
- * documented node default policy. Every backend is consulted for an explicit
+ * Evaluation order per node: explicit deny → explicit allow → operator access
+ * to mod nodes → documented node default policy. Every backend is consulted for an explicit
  * verdict; DENY from any backend in the chain beats ALLOW from any other
  * backend (and an explicit allow beats the node default).
  *
@@ -154,6 +154,7 @@ class BuiltInBackend : PermissionBackend {
 class PermissionManager(
     private val adapter: ServerAdapter,
     backends: List<PermissionBackend> = emptyList(),
+    private val isConfiguredNode: (String) -> Boolean = { false },
 ) : PermissionService {
 
     private val backendChain: List<PermissionBackend> = backends.toList()
@@ -203,16 +204,25 @@ class PermissionManager(
         // 1. explicit verdicts. A deny from ANY backend wins over an allow from
         // any other backend, so the documented "explicit deny is final" rule
         // holds across the whole chain instead of only within one backend.
+        val backends = backendChain + dynamicBackends
         var allowed = false
-        for (backend in backendChain + dynamicBackends) {
+        for (backend in backends) {
             when (backend.explicitVerdict(playerUuid, node)) {
                 PermissionVerdict.DENY -> return PermissionVerdict.DENY
                 PermissionVerdict.ALLOW -> allowed = true
                 PermissionVerdict.UNDEFINED -> Unit
             }
         }
-        if (allowed) return PermissionVerdict.ALLOW
-        // 2. documented default policy
+        val operatorFallback =
+            (NodeDefaults.isStandardNode(node) || isConfiguredNode(node)) && adapter.isOperator(playerUuid)
+        if (operatorFallback && backends.any { !it.isReady(playerUuid) }) {
+            // An unloaded backend may still hold a deny. Do not grant through
+            // the OP fallback or another backend until that verdict is known.
+            warmUp(playerUuid)
+            return PermissionVerdict.DENY
+        }
+        if (allowed || operatorFallback) return PermissionVerdict.ALLOW
+        // 2. documented default policy for everyone else
         return when (val policy = NodeDefaults.policyFor(node)) {
             null -> PermissionVerdict.UNDEFINED
             is NodeDefaultPolicy -> when (policy.type) {

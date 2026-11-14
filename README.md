@@ -84,6 +84,7 @@ Aliases `/names` and `/customnames` behave exactly like `/fancycrests`.
 | `reload` | Reload the configuration atomically |
 | `validate` | Validate the config file on disk without applying it |
 | `diagnose` | Channels, permission backends, catalog and storage status |
+| `nickname reset <player>` | Reset a player's nickname |
 
 Targets accept a UUID or an exact online player name. Nicknames are never used for lookups.
 
@@ -93,19 +94,34 @@ Targets accept a UUID or an exact online player name. Nicknames are never used f
 | --- | --- |
 | `fancycrests.menu` | everyone |
 | `fancycrests.equip` | everyone |
-| `fancycrests.nickname.set` | nobody (grant explicitly) |
-| `fancycrests.nickname.bypass_reserved` | nobody (grant explicitly) |
-| `fancycrests.admin.grant` | op level 2 |
-| `fancycrests.admin.revoke` | op level 2 |
-| `fancycrests.admin.inspect` | op level 2 |
-| `fancycrests.admin.preview` | op level 2 |
-| `fancycrests.admin.reload` | op level 2 |
-| `fancycrests.admin.validate` | op level 2 |
-| `fancycrests.admin.diagnose` | op level 2 |
+| `fancycrests.nickname.set` | operators; others require an explicit grant |
+| `fancycrests.nickname.bypass_reserved` | operators; others require an explicit grant |
+| `fancycrests.admin.grant` | operators |
+| `fancycrests.admin.revoke` | operators |
+| `fancycrests.admin.inspect` | operators |
+| `fancycrests.admin.preview` | operators |
+| `fancycrests.admin.reload` | operators |
+| `fancycrests.admin.validate` | operators |
+| `fancycrests.admin.diagnose` | operators |
+| `fancycrests.admin.nickname_reset` | operators |
 
-Evaluation order per node: explicit deny → explicit allow → documented default.
-An explicit deny cannot be overridden by operator status. The console may run admin
-commands but not player-only ones.
+Operators also have the custom permission nodes used by title definitions and
+second-line rule conditions within Fancy Crests. This does not write permissions
+to LuckPerms or grant them to other mods. The vanilla operator list determines
+player status, including lower-level operators and eligible singleplayer owners.
+
+Evaluation order per node: explicit deny → explicit allow → operator access to
+mod nodes → documented default. A deny from any backend overrides any allow or
+operator status. Use the built-in `permissions.nodes` deny list or LuckPerms
+`false` to disable an operator's node. If an operator's external permission data
+is still loading, access waits until its denies can be checked. Online OP changes
+revalidate equipped titles and display state.
+
+The nickname bypass node skips reserved-name and other online players' real-name
+checks. Disabling a nickname permission does not erase an existing nickname. A
+title's local ownership grant remains a separate eligibility source, so denying
+its permission does not revoke an existing ownership grant. Console/RCON can run
+admin commands but not player-only commands.
 
 ## Configuration
 

@@ -7,8 +7,8 @@ enum class PermissionVerdict { ALLOW, DENY, UNDEFINED }
 
 /**
  * Permission resolution service. Evaluation order per node: explicit deny,
- * explicit allow, then the node's documented default policy. UNDEFINED means
- * no backend produced a decision and the caller must apply the node default.
+ * explicit allow, operator access to mod nodes, then the documented default.
+ * UNDEFINED means no backend, operator rule or node default made a decision.
  */
 interface PermissionService {
     fun check(playerUuid: UUID, node: String): PermissionVerdict

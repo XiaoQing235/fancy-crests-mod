@@ -44,6 +44,7 @@ object TestFixtures {
         override fun playerNameExact(name: String): UUID? =
             knownNames.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
         override fun operatorLevel(uuid: UUID): Int = operators[uuid] ?: 0
+        override fun isOperator(uuid: UUID): Boolean = uuid in operators
         override fun dimensionKey(uuid: UUID): String? = dimension
         override fun knownPlayerNames(): Map<String, UUID> =
             knownNames.mapKeys { (name, _) -> name.lowercase() }

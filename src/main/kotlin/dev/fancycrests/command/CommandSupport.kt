@@ -24,8 +24,8 @@ sealed interface TargetResolution {
  * Command-side helpers: the permission gate, target resolution and feedback.
  *
  * Permission evaluation for players goes through the core permission service
- * (explicit deny → explicit allow → documented node default, including the
- * op-level-2 fallback for admin nodes). Non-player sources (console/RCON,
+ * (explicit deny → explicit allow → operator access to mod nodes → documented
+ * node default). Non-player sources (console/RCON,
  * command blocks, datapack functions) are held to the vanilla convention:
  * admin nodes require the source's own permission level to meet the node's
  * documented operator level — console/RCON run at level 4, command blocks
