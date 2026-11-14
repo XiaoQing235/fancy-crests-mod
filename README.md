@@ -189,9 +189,8 @@ classes. Do not also copy a Fancy Crests jar into its `mods/` directory.
 
 Keep the existing shared world and configuration between test sessions. Stop the
 server with the console command `stop` and wait for shutdown before changing
-mods, backing up data, or starting it from another tool. Never run two instances
-against this directory. Back up the entire stopped server before an intentional
-reset; local backups belong in the ignored `run-backups/` directory.
+mods or starting it from another tool. Never run two instances against this
+directory. Reset test data only when explicitly requested.
 
 The locally configured test server has usage notes in `run/README.md`. Its
 configuration, player data, optional mods and control credentials are local only

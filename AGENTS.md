@@ -9,9 +9,9 @@
   instance only after confirming it is this project's server.
 - Stop gracefully with `stop` and wait for process exit. Do not kill the process
   as a routine shutdown or reset the shared world/configuration for a test.
-- Back up the complete stopped server to ignored `run-backups/` before an
-  explicitly requested reset. Preserve player data and optional-mod databases.
-- Keep runtime files, credentials, player identities and backups out of Git.
+- Reset or delete test data only within the user's requested scope. Do not
+  create backups unless the user explicitly requests them.
+- Keep runtime files, credentials and player identities out of Git.
   Do not force-add ignored files or place the project's mod jar in `run/mods/`.
 - Document and restore temporary test changes. Fake-player checks do not replace
   real-client rendering and network lifecycle acceptance.
