@@ -21,7 +21,9 @@ import net.minecraft.world.inventory.AbstractContainerMenu
 object TitleMenuService {
 
     /** Opens the menu for [player]; returns true when a menu was opened. */
-    fun open(player: ServerPlayer, core: CoreServices): Boolean {
+    fun open(player: ServerPlayer, core: CoreServices): Boolean = open(player, core, TitleMenuPage.PREFIX)
+
+    internal fun open(player: ServerPlayer, core: CoreServices, page: TitleMenuPage): Boolean {
         if (!core.isStarted) {
             player.sendSystemMessage(
                 Component.literal("Fancy Crests is still starting; try again in a moment.")
@@ -37,14 +39,7 @@ object TitleMenuService {
             )
             return false
         }
-        if (core.catalogService.size() == 0) {
-            player.sendSystemMessage(
-                Component.literal("The title catalog is empty; ask an administrator to configure titles.")
-                    .withStyle(ChatFormatting.YELLOW),
-            )
-            return false
-        }
-        player.openMenu(TitleMenuProvider(player, core))
+        player.openMenu(TitleMenuProvider(player, core, page))
         return true
     }
 }
@@ -53,10 +48,11 @@ object TitleMenuService {
 private class TitleMenuProvider(
     private val viewer: ServerPlayer,
     private val core: CoreServices,
+    private val page: TitleMenuPage,
 ) : MenuProvider {
 
-    override fun getDisplayName(): Component = Component.literal("Titles")
+    override fun getDisplayName(): Component = Component.literal(page.label)
 
     override fun createMenu(containerId: Int, playerInventory: Inventory, player: Player): AbstractContainerMenu =
-        TitleMenu(containerId, playerInventory, viewer, core)
+        TitleMenu(containerId, playerInventory, viewer, core, page)
 }

@@ -66,12 +66,18 @@ Aliases `/names` and `/customnames` behave exactly like `/fancycrests`.
 
 | Command | Description |
 | --- | --- |
-| `menu` | Open the title menu |
+| `menu` | Open the prefix, suffix and nickname menus |
 | `equip <prefix\|suffix> <id>` | Equip a title you are eligible for |
 | `unequip <prefix\|suffix> <id>` | Unequip one title |
 | `unequip <prefix\|suffix> all` | Unequip every title in that slot |
 | `nickname <text>` | Set a nickname (needs `fancycrests.nickname.set`) |
 | `nickname reset` | Drop the nickname and show the profile name again |
+
+Use the buttons at the bottom of the menu to switch between prefixes, suffixes
+and nicknames. Select an equipped title to remove it, or an available title to
+equip it. The nickname menu lets permitted players enter or reset a nickname;
+its vanilla anvil input is limited to 50 characters, including formatting codes.
+Use the nickname command when a longer input is allowed by the configuration.
 
 ### Administrators
 
