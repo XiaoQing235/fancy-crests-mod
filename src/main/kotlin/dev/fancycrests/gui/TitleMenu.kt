@@ -6,7 +6,6 @@ import dev.fancycrests.api.TitleDefinition
 import dev.fancycrests.api.TitleId
 import dev.fancycrests.api.TitleSlot
 import dev.fancycrests.core.CoreServices
-import dev.fancycrests.core.selection.Eligibility
 import dev.fancycrests.core.selection.RejectionReason
 import dev.fancycrests.core.selection.SelectionResult
 import dev.fancycrests.core.selection.UnequipTarget
@@ -14,9 +13,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import net.minecraft.ChatFormatting
 import net.minecraft.core.component.DataComponents
-import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.network.chat.Component
-import net.minecraft.resources.Identifier
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.world.Container
 import net.minecraft.world.SimpleContainer
@@ -259,7 +256,11 @@ class TitleMenu private constructor(
             if (definition == null) {
                 backing.setItem(index, ItemStack.EMPTY)
             } else {
-                backing.setItem(index, titleItem(definition, state))
+                val limit = when (definition.slot) {
+                    TitleSlot.PREFIX -> core.configService.current.equipment.maxPrefixes
+                    TitleSlot.SUFFIX -> core.configService.current.equipment.maxSuffixes
+                }
+                backing.setItem(index, titleItem(definition, state, core.selectionService.isEligible(viewerUuid, definition.id), limit))
                 actions[index] = MenuAction.ToggleTitle(definition.id, definition.slot)
             }
         }
@@ -299,61 +300,6 @@ class TitleMenu private constructor(
         broadcastChanges()
     }
 
-    /** Builds the display stack of one catalog entry for the viewer's state. */
-    private fun titleItem(definition: TitleDefinition, state: dev.fancycrests.api.PlayerTitleState): ItemStack {
-        val equippedList = when (definition.slot) {
-            TitleSlot.PREFIX -> state.prefixes
-            TitleSlot.SUFFIX -> state.suffixes
-        }
-        val equippedIndex = equippedList.indexOf(definition.id)
-        val eligibility = core.selectionService.isEligible(viewerUuid, definition.id)
-        val locked = eligibility == Eligibility.NotEligible
-
-        val base = when {
-            locked -> Items.DYE.gray()
-            equippedIndex >= 0 -> Items.NAME_TAG
-            else -> Items.PAPER
-        }
-        val stack = iconStack(definition, base)
-        val name = definition.displayName.copy()
-        if (locked) name.withStyle(ChatFormatting.GRAY)
-        stack.set(DataComponents.CUSTOM_NAME, name)
-
-        val lore = mutableListOf<Component>()
-        lore += Component.literal("Preview: ").withStyle(ChatFormatting.GRAY).append(definition.text.copy())
-        lore += Component.literal(
-            "Slot: ${if (definition.slot == TitleSlot.PREFIX) "prefix" else "suffix"}" +
-                (definition.category?.let { " | Category: $it" } ?: ""),
-        ).withStyle(ChatFormatting.DARK_GRAY)
-        when {
-            equippedIndex >= 0 ->
-                lore += Component.literal(
-                    "Equipped as ${if (definition.slot == TitleSlot.PREFIX) "prefix" else "suffix"} #${equippedIndex + 1} — click to unequip",
-                ).withStyle(ChatFormatting.GREEN)
-            locked -> {
-                lore += Component.literal(
-                    if (definition.permission != null) {
-                        "Locked: requires permission '${definition.permission}' or an admin grant"
-                    } else {
-                        "Locked: requires an admin grant"
-                    },
-                ).withStyle(ChatFormatting.RED)
-            }
-            else -> lore += Component.literal("Click to equip").withStyle(ChatFormatting.GREEN)
-        }
-        stack.set(DataComponents.LORE, ItemLore(lore))
-        return stack
-    }
-
-    /** The configured icon item when valid, else [fallback]. */
-    private fun iconStack(definition: TitleDefinition, fallback: net.minecraft.world.item.Item): ItemStack {
-        val item = definition.iconItem
-            ?.let { Identifier.tryParse(it) }
-            ?.let { BuiltInRegistries.ITEM.getOptional(it).orElse(null) }
-            ?: fallback
-        return ItemStack(item)
-    }
-
     private fun rejectionText(rejection: SelectionResult.Rejected, titleName: String): String {
         val detail = rejection.detail?.let { ": $it" } ?: ""
         return when (rejection.reason) {
@@ -383,13 +329,13 @@ private fun ControlItem(
 ): ItemStack {
     val stack = ItemStack(item)
     val name = Component.literal(if (enabled) label else "$label (unavailable)")
-    stack.set(DataComponents.CUSTOM_NAME, name.withStyle(if (enabled) ChatFormatting.WHITE else ChatFormatting.DARK_GRAY))
+    stack.set(DataComponents.CUSTOM_NAME, withoutItalic(name.withStyle(if (enabled) ChatFormatting.WHITE else ChatFormatting.DARK_GRAY)))
     return stack
 }
 
 private inline fun ItemStack.copyLore(loreBuilder: (MutableList<Component>) -> Unit): ItemStack {
     val lore = mutableListOf<Component>()
     loreBuilder(lore)
-    set(DataComponents.LORE, ItemLore(lore))
+    set(DataComponents.LORE, ItemLore(lore.map(::withoutItalic)))
     return this
 }
