@@ -25,6 +25,7 @@ import net.minecraft.world.inventory.Slot
 import net.minecraft.world.item.ItemStack
 import net.minecraft.world.item.Items
 import net.minecraft.world.item.component.ItemLore
+import net.minecraft.world.item.component.TooltipDisplay
 
 /** One clickable menu entry. */
 private sealed interface MenuAction {
@@ -69,8 +70,8 @@ private data class MenuVersion(val catalog: Long, val config: Long, val revision
  *    cannot double-apply (SelectionService's serial queue guarantees
  *    idempotent sequencing on top).
  *
- * Slots 0..44 contain the current page; the bottom row switches pages and
- * navigates the current title list.
+ * The middle four rows contain the current page; the top row switches menus
+ * and the bottom row navigates the current title list.
  */
 class TitleMenu private constructor(
     containerId: Int,
@@ -258,22 +259,21 @@ class TitleMenu private constructor(
 
         val state = core.selectionService.stateOf(viewerUuid)
         actions.clear()
-        for (index in 0 until PAGE_SIZE) {
-            val definition = definitions.getOrNull(page * PAGE_SIZE + index)
-            if (definition == null) {
-                backing.setItem(index, ItemStack.EMPTY)
-            } else {
-                val limit = when (definition.slot) {
-                    TitleSlot.PREFIX -> core.configService.current.equipment.maxPrefixes
-                    TitleSlot.SUFFIX -> core.configService.current.equipment.maxSuffixes
-                }
-                backing.setItem(index, titleItem(definition, state, core.selectionService.isEligible(viewerUuid, definition.id), limit))
-                actions[index] = MenuAction.ToggleTitle(definition.id, definition.slot)
-            }
+        val border = ItemStack(Items.STAINED_GLASS_PANE.lightGray()).apply {
+            set(DataComponents.TOOLTIP_DISPLAY, TooltipDisplay(true, TooltipDisplay.DEFAULT.hiddenComponents()))
         }
-
-        for (index in PAGE_SIZE until ROWS * 9) {
-            backing.setItem(index, ItemStack.EMPTY)
+        for (index in 0 until ROWS * 9) {
+            val isBorder = index < 9 || index >= (ROWS - 1) * 9
+            backing.setItem(index, if (isBorder) border.copy() else ItemStack.EMPTY)
+        }
+        for ((index, definition) in titlesOnPage(definitions, page).withIndex()) {
+            val limit = when (definition.slot) {
+                TitleSlot.PREFIX -> core.configService.current.equipment.maxPrefixes
+                TitleSlot.SUFFIX -> core.configService.current.equipment.maxSuffixes
+            }
+            val slot = 9 + index
+            backing.setItem(slot, titleItem(definition, state, core.selectionService.isEligible(viewerUuid, definition.id), limit))
+            actions[slot] = MenuAction.ToggleTitle(definition.id, definition.slot)
         }
 
         if (menuPage == TitleMenuPage.NICKNAME) renderNicknamePage(state)
@@ -291,9 +291,9 @@ class TitleMenu private constructor(
         }
 
         val navigation = listOf(
-            Triple(46, TitleMenuPage.PREFIX, Items.GOLD_INGOT),
-            Triple(47, TitleMenuPage.SUFFIX, Items.DIAMOND),
-            Triple(48, TitleMenuPage.NICKNAME, Items.NAME_TAG),
+            Triple(6, TitleMenuPage.PREFIX, Items.GOLD_INGOT),
+            Triple(7, TitleMenuPage.SUFFIX, Items.DIAMOND),
+            Triple(8, TitleMenuPage.NICKNAME, Items.NAME_TAG),
         )
         for ((index, target, item) in navigation) {
             backing.setItem(index, ControlItem(item, target.label, true).copyLore { lore ->
@@ -390,8 +390,8 @@ class TitleMenu private constructor(
     companion object {
         const val ROWS = 6
 
-        /** 6 rows * 9 columns minus the control row = 45 title slots. */
-        const val PAGE_SIZE = (ROWS - 1) * 9
+        /** The first and last rows are reserved for navigation. */
+        const val PAGE_SIZE = (ROWS - 2) * 9
     }
 }
 
@@ -399,6 +399,9 @@ internal fun titlesForPage(definitions: Collection<TitleDefinition>, page: Title
     definitions.filter { it.slot == page.slot }.sortedWith(
         compareBy({ it.category ?: "" }, { it.sortOrder }, { it.id.value }),
     )
+
+internal fun titlesOnPage(definitions: List<TitleDefinition>, page: Int): List<TitleDefinition> =
+    definitions.drop(page * TitleMenu.PAGE_SIZE).take(TitleMenu.PAGE_SIZE)
 
 /** Builds one control-row item. */
 private fun ControlItem(

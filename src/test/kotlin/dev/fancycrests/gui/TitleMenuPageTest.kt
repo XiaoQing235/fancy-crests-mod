@@ -25,4 +25,14 @@ class TitleMenuPageTest {
         assertEquals(listOf("suffix"), titlesForPage(titles, TitleMenuPage.SUFFIX).map { it.id.value })
         assertEquals(emptyList(), titlesForPage(titles, TitleMenuPage.NICKNAME))
     }
+
+    @Test
+    fun `two and a half pages use four rows without losing or repeating titles`() {
+        val titles = (1..90).map { title("title_$it", TitleSlot.PREFIX, "Test", it) }
+        val pages = (0..2).map { titlesOnPage(titles, it) }
+
+        assertEquals(listOf(36, 36, 18), pages.map { it.size })
+        assertEquals(titles, pages.flatten())
+        assertEquals(emptyList(), titlesOnPage(titles, 3))
+    }
 }
