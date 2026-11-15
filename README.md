@@ -73,11 +73,13 @@ Aliases `/names` and `/customnames` behave exactly like `/fancycrests`.
 | `nickname <text>` | Set a nickname (needs `fancycrests.nickname.set`) |
 | `nickname reset` | Drop the nickname and show the profile name again |
 
-Use the buttons at the bottom of the menu to switch between prefixes, suffixes
-and nicknames. Select an equipped title to remove it, or an available title to
-equip it. The nickname menu lets permitted players enter or reset a nickname;
-its vanilla anvil input is limited to 50 characters, including formatting codes.
-Use the nickname command when a longer input is allowed by the configuration.
+Use the buttons at the top right of the menu to switch between prefixes,
+suffixes and nicknames. Select an equipped title to remove it, or an available
+title to equip it. The nickname menu lists administrator-configured presets;
+players can select one or reset their nickname. Custom input requires
+`fancycrests.nickname.set`. Its vanilla anvil input is limited to 50 characters,
+including formatting codes. Use the nickname command when a longer input is
+allowed by the configuration.
 
 ### Administrators
 
@@ -152,6 +154,13 @@ catalog, so a bad edit cannot wipe existing choices. Fix the file and restart or
 | `secondLineRules` | `id`, `priority` (0–1000), `condition` (`dimension` / `permission`), `template`, `refreshTicks` (1–72000, default 20) |
 | `render` | `distanceBlocks` (8–128) and the first/second line offsets |
 | `titles` | `id`, `slot` (`prefix`/`suffix`), `displayName`, `text` (`&` codes), `permission`, `category`, `iconItem`, `sortOrder` (0–10000) |
+
+Add a `presets` array inside the `nickname` section to list selectable nicknames
+in menu order, for example `"presets": ["&aExplorer", "&bBuilder"]`.
+Players with `fancycrests.menu` may select or reset a preset without the custom
+nickname permission. Presets still follow the configured nickname length,
+pattern, reserved-name and player-name checks; `allowSet: false` disables
+selecting and entering nicknames, while reset remains available.
 
 Titles use a name tag icon by default. Set `iconItem` to a registered item ID,
 such as `minecraft:diamond`, to use a different icon. Equipped titles show an

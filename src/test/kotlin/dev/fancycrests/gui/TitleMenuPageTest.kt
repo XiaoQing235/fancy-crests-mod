@@ -29,10 +29,17 @@ class TitleMenuPageTest {
     @Test
     fun `two and a half pages use four rows without losing or repeating titles`() {
         val titles = (1..90).map { title("title_$it", TitleSlot.PREFIX, "Test", it) }
-        val pages = (0..2).map { titlesOnPage(titles, it) }
+        val pages = (0..2).map { entriesOnPage(titles, it) }
 
         assertEquals(listOf(36, 36, 18), pages.map { it.size })
         assertEquals(titles, pages.flatten())
-        assertEquals(emptyList(), titlesOnPage(titles, 3))
+        assertEquals(emptyList(), entriesOnPage(titles, 3))
+    }
+
+    @Test
+    fun `nickname presets use the same ordered pagination`() {
+        val presets = (1..40).map { "Nickname$it" }
+        assertEquals(presets.take(36), entriesOnPage(presets, 0))
+        assertEquals(presets.drop(36), entriesOnPage(presets, 1))
     }
 }

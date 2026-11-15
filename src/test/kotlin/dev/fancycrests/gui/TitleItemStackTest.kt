@@ -12,8 +12,11 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import net.minecraft.SharedConstants
+import net.minecraft.ChatFormatting
 import net.minecraft.core.component.DataComponentMap
+import net.minecraft.core.component.DataComponents
 import net.minecraft.network.chat.Component
+import net.minecraft.network.chat.TextColor
 import net.minecraft.server.Bootstrap
 import net.minecraft.world.item.Items
 
@@ -67,5 +70,22 @@ class TitleItemStackTest {
 
         val inherentlyGlinting = definition.copy(iconItem = "minecraft:enchanted_book")
         assertFalse(titleItem(inherentlyGlinting, empty, Eligibility.Public, 1).hasFoil())
+    }
+
+    @Test
+    fun `nickname preset displays formatted text and highlights selection`() {
+        val available = nicknamePresetItem("&a&oExplorer", selected = false, enabled = true)
+        assertEquals(Items.NAME_TAG, available.item)
+        assertEquals("Explorer", available.hoverName.string)
+        assertEquals(TextColor.fromLegacyFormat(ChatFormatting.GREEN), available.hoverName.style.color)
+        assertFalse(available.hoverName.style.isItalic)
+        assertFalse(available.hasFoil())
+        assertEquals("Click to select", available.get(DataComponents.LORE)!!.styledLines().single().string)
+
+        val selected = nicknamePresetItem("&aExplorer", selected = true, enabled = false)
+        assertTrue(selected.hasFoil())
+        assertEquals("Click to reset", selected.get(DataComponents.LORE)!!.styledLines().single().string)
+        val disabled = nicknamePresetItem("Explorer", selected = false, enabled = false)
+        assertEquals("Nicknames are disabled", disabled.get(DataComponents.LORE)!!.styledLines().single().string)
     }
 }

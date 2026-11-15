@@ -41,6 +41,8 @@ private sealed interface MenuAction {
     data object EditNickname : MenuAction
 
     data object ResetNickname : MenuAction
+
+    data class SelectNickname(val text: String) : MenuAction
 }
 
 internal enum class TitleMenuPage(val label: String, val slot: TitleSlot?) {
@@ -161,6 +163,7 @@ class TitleMenu private constructor(
             }
             MenuAction.EditNickname -> openNicknameInput()
             MenuAction.ResetNickname -> resetNickname()
+            is MenuAction.SelectNickname -> selectNickname(action.text)
             is MenuAction.ToggleTitle -> handleToggle(action)
         }
     }
@@ -254,12 +257,15 @@ class TitleMenu private constructor(
 
     private fun sortedTitles(): List<TitleDefinition> = titlesForPage(core.catalogService.all(), menuPage)
 
-    private fun pageCount(): Int = (sortedTitles().size + PAGE_SIZE - 1) / PAGE_SIZE
+    private fun pageCount(): Int {
+        val size = if (menuPage == TitleMenuPage.NICKNAME) core.configService.current.nickname.presets.size else sortedTitles().size
+        return maxOf(1, (size + PAGE_SIZE - 1) / PAGE_SIZE)
+    }
 
     private fun renderPage() {
         renderedVersion = captureVersion()
         val definitions = sortedTitles()
-        val pages = maxOf(1, (definitions.size + PAGE_SIZE - 1) / PAGE_SIZE)
+        val pages = pageCount()
         if (page > pages - 1) page = pages - 1
         if (page < 0) page = 0
 
@@ -272,7 +278,7 @@ class TitleMenu private constructor(
             val isBorder = index < 9 || index >= (ROWS - 1) * 9
             backing.setItem(index, if (isBorder) border.copy() else ItemStack.EMPTY)
         }
-        for ((index, definition) in titlesOnPage(definitions, page).withIndex()) {
+        for ((index, definition) in entriesOnPage(definitions, page).withIndex()) {
             val limit = when (definition.slot) {
                 TitleSlot.PREFIX -> core.configService.current.equipment.maxPrefixes
                 TitleSlot.SUFFIX -> core.configService.current.equipment.maxSuffixes
@@ -284,17 +290,15 @@ class TitleMenu private constructor(
 
         if (menuPage == TitleMenuPage.NICKNAME) renderNicknamePage(state)
 
-        if (menuPage != TitleMenuPage.NICKNAME) {
-            val canPrev = page > 0
-            backing.setItem(45, ControlItem(Items.ARROW, "Previous page", canPrev, showUnavailable = false))
-            if (canPrev) actions[45] = MenuAction.PreviousPage
+        val canPrev = page > 0
+        backing.setItem(45, ControlItem(Items.ARROW, "Previous page", canPrev, showUnavailable = false))
+        if (canPrev) actions[45] = MenuAction.PreviousPage
 
-            backing.setItem(49, ControlItem(Items.BOOK, "${menuPage.label} — page ${page + 1}/$pages", true))
+        backing.setItem(49, ControlItem(Items.BOOK, "${menuPage.label} — page ${page + 1}/$pages", true))
 
-            val canNext = page < pages - 1
-            backing.setItem(53, ControlItem(Items.ARROW, "Next page", canNext, showUnavailable = false))
-            if (canNext) actions[53] = MenuAction.NextPage
-        }
+        val canNext = page < pages - 1
+        backing.setItem(53, ControlItem(Items.ARROW, "Next page", canNext, showUnavailable = false))
+        if (canNext) actions[53] = MenuAction.NextPage
 
         val navigation = listOf(
             Triple(6, TitleMenuPage.PREFIX, Items.GOLD_INGOT),
@@ -312,44 +316,65 @@ class TitleMenu private constructor(
     }
 
     private fun renderNicknamePage(state: dev.fancycrests.api.PlayerTitleState) {
+        val nicknameConfig = core.configService.current.nickname
+        for ((index, text) in entriesOnPage(nicknameConfig.presets, page).withIndex()) {
+            val selected = state.nickname == text
+            val slot = 9 + index
+            backing.setItem(slot, nicknamePresetItem(text, selected, nicknameConfig.allowSet))
+            if (selected) actions[slot] = MenuAction.ResetNickname
+            else if (nicknameConfig.allowSet) actions[slot] = MenuAction.SelectNickname(text)
+        }
+
         val permitted = core.permissionManager.check(viewerUuid, Permissions.NICKNAME_SET) == PermissionVerdict.ALLOW
-        val canEdit = permitted && core.configService.current.nickname.allowSet
-        val canReset = permitted && state.nickname != null
-        backing.setItem(20, ControlItem(Items.NAME_TAG, "Set nickname", canEdit).copyLore { lore ->
+        val canEdit = permitted && nicknameConfig.allowSet
+        val canReset = state.nickname != null
+        backing.setItem(46, ControlItem(Items.NAME_TAG, "Custom nickname", canEdit).copyLore { lore ->
             lore += Component.literal("Current: ${state.nickname ?: "(profile name)"}").withStyle(ChatFormatting.GRAY)
             lore += Component.literal(
                 when {
-                    !permitted -> "You lack permission to change your nickname"
-                    !core.configService.current.nickname.allowSet -> "Nicknames are disabled"
+                    !permitted -> "You lack permission to set a custom nickname"
+                    !nicknameConfig.allowSet -> "Nicknames are disabled"
                     else -> "Click to enter a nickname"
                 },
             ).withStyle(if (canEdit) ChatFormatting.GREEN else ChatFormatting.RED)
-            if (canEdit && core.configService.current.nickname.maxLength > net.minecraft.world.inventory.AnvilMenu.MAX_NAME_LENGTH) {
+            if (canEdit && nicknameConfig.maxLength > net.minecraft.world.inventory.AnvilMenu.MAX_NAME_LENGTH) {
                 lore += Component.literal("For names over 50 characters, use /fancycrests nickname.").withStyle(ChatFormatting.GRAY)
             }
         })
-        if (canEdit) actions[20] = MenuAction.EditNickname
+        if (canEdit) actions[46] = MenuAction.EditNickname
 
-        backing.setItem(24, ControlItem(Items.BARRIER, "Reset nickname", canReset).copyLore { lore ->
+        backing.setItem(47, ControlItem(Items.BARRIER, "Reset nickname", canReset).copyLore { lore ->
             lore += Component.literal(
-                when {
-                    !permitted -> "You lack permission to change your nickname"
-                    state.nickname == null -> "No nickname to reset"
-                    else -> "Click to restore your profile name"
-                },
+                if (canReset) "Click to restore your profile name" else "No nickname to reset",
             ).withStyle(if (canReset) ChatFormatting.RED else ChatFormatting.GRAY)
         })
-        if (canReset) actions[24] = MenuAction.ResetNickname
+        if (canReset) actions[47] = MenuAction.ResetNickname
     }
 
     private fun openNicknameInput() {
-        if (!nicknameAllowed(requireEnabled = true)) return
+        if (!nicknameAllowed(requireEnabled = true, requireCustom = true)) return
         NicknameInputMenu.open(viewer, core)
+    }
+
+    private fun selectNickname(text: String) {
+        if (!clickInFlight.compareAndSet(false, true)) return
+        if (!nicknameAllowed(requireEnabled = true, requireCustom = false)) {
+            clickInFlight.set(false)
+            return
+        }
+        core.selectionService.selectNicknamePreset(viewerUuid, text, "menu") { result ->
+            try {
+                sendNicknameResult(viewer, result, text)
+            } finally {
+                clickInFlight.set(false)
+                (viewer.containerMenu as? TitleMenu)?.renderPage()
+            }
+        }
     }
 
     private fun resetNickname() {
         if (!clickInFlight.compareAndSet(false, true)) return
-        if (!nicknameAllowed(requireEnabled = false)) {
+        if (!nicknameAllowed(requireEnabled = false, requireCustom = false)) {
             clickInFlight.set(false)
             return
         }
@@ -363,14 +388,15 @@ class TitleMenu private constructor(
         }
     }
 
-    private fun nicknameAllowed(requireEnabled: Boolean): Boolean {
+    private fun nicknameAllowed(requireEnabled: Boolean, requireCustom: Boolean): Boolean {
         if (captureVersion() != renderedVersion) {
             renderPage()
             viewer.sendSystemMessage(Component.literal("The menu changed; please click again.").withStyle(ChatFormatting.YELLOW))
             return false
         }
-        if (core.permissionManager.check(viewerUuid, Permissions.NICKNAME_SET) != PermissionVerdict.ALLOW) {
-            viewer.sendSystemMessage(Component.literal("You lack permission to change your nickname.").withStyle(ChatFormatting.RED))
+        if (!TitleMenuService.canOpen(viewer, core)) return false
+        if (requireCustom && core.permissionManager.check(viewerUuid, Permissions.NICKNAME_SET) != PermissionVerdict.ALLOW) {
+            viewer.sendSystemMessage(Component.literal("You lack permission to set a custom nickname.").withStyle(ChatFormatting.RED))
             return false
         }
         if (requireEnabled && !core.configService.current.nickname.allowSet) {
@@ -406,8 +432,8 @@ internal fun titlesForPage(definitions: Collection<TitleDefinition>, page: Title
         compareBy({ it.category ?: "" }, { it.sortOrder }, { it.id.value }),
     )
 
-internal fun titlesOnPage(definitions: List<TitleDefinition>, page: Int): List<TitleDefinition> =
-    definitions.drop(page * TitleMenu.PAGE_SIZE).take(TitleMenu.PAGE_SIZE)
+internal fun <T> entriesOnPage(entries: List<T>, page: Int): List<T> =
+    entries.drop(page * TitleMenu.PAGE_SIZE).take(TitleMenu.PAGE_SIZE)
 
 /** Builds one control-row item. */
 private fun ControlItem(
