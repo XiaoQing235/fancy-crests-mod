@@ -7,34 +7,25 @@
 [![Java](https://img.shields.io/badge/Java-25-ED8B00)](https://adoptium.net/)
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE)
 
-A server-side [Fabric](https://fabricmc.net/) mod that gives players customizable crests:
-equippable prefixes and suffixes, nicknames, and an admin-configured second line —
-rendered to **vanilla clients**. No client-side mod is needed.
+[简体中文](README.zh-CN.md) | English
 
-- Mod ID: `fancycrests`
-- Command roots: `/fancycrests`, `/names`, `/customnames`
-- Build artifact: `FancyCrests-<version>.jar`
-
-> **Status: pre-release.** P0–P4 are implemented (toolchain, render channel, core
-> services, GUI and dynamic templates, optional integrations). P5 acceptance is still
-> open: client-side rendering verification with vanilla 26.2 clients, performance
-> evidence, and the release package.
+This is a server-side [Fabric](https://fabricmc.net/) mod that gives players a rich customizable title experience without requiring anything on the client. It supports prefixes and suffixes with configurable limits and ordering, custom nicknames or preset selections, and a second line of text that administrators can configure flexibly.
 
 > [!CAUTION]
 > Developed with assistance from **GPT-6-Astra**, **DeepSeek-V4.1-Flash-1017** and **GLM-5.3**.
-> Designed for my own server — use at your own risk.
+> The mod was originally designed for the author's own server. Please evaluate it for yourself and use it at your own risk.
 
 ## Features
 
-- **Prefixes and suffixes** — equip several per player, kept in equip order; slot limits are configurable.
-- **Nicknames** — validated length, characters, reserved names and an optional bypass node.
-- **Admin second line** — static text mixed with built-in placeholders, matched by priority and target conditions, refreshed on a configurable tick interval.
-- **Configurable first line** — reorder the `prefixes` / `name` / `suffixes` segments and their separators.
-- **Rendered to vanilla clients** — one virtual `text_display` pair per target plus an optional second-line entity, carried by a per-player client-side virtual team. No real server scoreboard teams are created or modified.
-- **Native GUI** — browsing, previewing and equipping happens in a vanilla container menu.
-- **Persistence** — SQLite storage with optimistic revisions; choices survive restarts.
-- **Hot reload** — `/fancycrests reload` swaps the configuration atomically and revalidates online players.
-- **Own permission backend** — works with no permissions plugin installed; optional LuckPerms backend when present.
+- **Prefixes and suffixes**: Each player can equip multiple titles at once. They appear in the order equipped, and the limit for each slot can be configured.
+- **Nickname system**: Validates nickname length, allowed characters and reserved names. Permission nodes can be configured to bypass validation for specific players.
+- **Administrator-controlled second line**: Combine static text with built-in placeholders. Rules can match by priority and target conditions, and refresh at a configured game-tick interval.
+- **Player-controlled first line**: Reorder the `prefixes`, `name` and `suffixes` segments, and configure the separators between them.
+- **Rendered for vanilla clients**: Each target gets a pair of virtual `text_display` entities, optionally including a second-line entity. Data is sent through a client-side virtual team for each player; no real scoreboard teams are created or modified on the server.
+- **Native GUI menu**: Players can browse, preview and equip titles directly in a vanilla container menu.
+- **Data persistence**: Uses SQLite with optimistic revision control. Player choices are retained across server restarts.
+- **Configuration hot reload**: Run `/fancycrests reload` to atomically replace the active configuration and revalidate online players.
+- **Built-in permission backend**: Works out of the box without an additional permissions plugin. If LuckPerms is installed, its permission backend can also be used.
 
 ## Requirements
 
@@ -46,191 +37,114 @@ rendered to **vanilla clients**. No client-side mod is needed.
 | Fabric Language Kotlin | 1.14.2+kotlin.2.4.21 |
 | Java | 25 |
 
-Optional integrations (not required to run): **LuckPerms** (Fabric) 5.5.85,
-**Text Placeholder API** 3.1.0-beta.1+26.2.
+Optional integrations: **LuckPerms** (Fabric) 5.5.85 and **Text Placeholder API** 3.1.0-beta.1+26.2.
 
-Clients need nothing — vanilla 26.2 works.
+Nothing needs to be installed on the client.
 
 ## Installation
 
 1. Install Fabric Loader, Fabric API and Fabric Language Kotlin on the server.
-2. Put `FancyCrests-<version>.jar` into `mods/`.
-3. Start the server once to generate `config/fancycrests.json`.
-4. Edit titles, templates and rules, then run `/fancycrests reload`.
+2. Put `FancyCrests-<version>.jar` into the `mods/` directory.
+3. Start the server once and wait for the default configuration file `config/fancycrests.json` to be generated.
+4. Edit titles, templates and rules as needed, then run `/fancycrests reload` to apply them.
 
 ## Commands
 
-Aliases `/names` and `/customnames` behave exactly like `/fancycrests`.
+The aliases `/names` and `/customnames` behave exactly like `/fancycrests`; use whichever you prefer.
 
-### Players
+### Player Commands
 
 | Command | Description |
 | --- | --- |
 | `menu` | Open the prefix, suffix and nickname menus |
-| `equip <prefix\|suffix> <id>` | Equip a title you are eligible for |
-| `unequip <prefix\|suffix> <id>` | Unequip one title |
-| `unequip <prefix\|suffix> all` | Unequip every title in that slot |
-| `nickname <text>` | Set a nickname (needs `fancycrests.nickname.set`) |
-| `nickname reset` | Drop the nickname and show the profile name again |
+| `equip <prefix\|suffix> <id>` | Equip a title you are eligible to use |
+| `unequip <prefix\|suffix> <id>` | Unequip a title |
+| `unequip <prefix\|suffix> all` | Unequip all titles in the selected slot |
+| `nickname <text>` | Set a nickname (requires `fancycrests.nickname.set`) |
+| `nickname reset` | Clear the nickname and show the profile name again |
 
-Use the buttons at the top right of the menu to switch between prefixes,
-suffixes and nicknames. Select an equipped title to remove it, or an available
-title to equip it. The nickname menu lists administrator-configured presets;
-players can select one or reset their nickname. Custom input requires
-`fancycrests.nickname.set`. Its vanilla anvil input is limited to 50 characters,
-including formatting codes. Use the nickname command when a longer input is
-allowed by the configuration.
+Click the buttons at the top right of the menu to switch between the prefix, suffix and nickname views. In the title list, click an equipped title to unequip it, or an available title to equip it. In the nickname menu, players can choose an administrator-configured preset or reset their nickname. Manually entering a custom nickname requires the `fancycrests.nickname.set` permission. Note that the vanilla anvil input supports at most 50 characters, including formatting codes. If the configuration allows longer nicknames, use the nickname command instead.
 
-### Administrators
+### Administrator Commands
 
 | Command | Description |
 | --- | --- |
-| `grant <player> <titleId>` | Grant a local ownership record |
-| `revoke <player> <titleId>` | Revoke a local ownership record |
-| `inspect <player>` | Show state, ownership and equipped titles |
-| `preview <player>` | Resolve first and second line without touching state |
-| `reload` | Reload the configuration atomically |
-| `validate` | Validate the config file on disk without applying it |
-| `diagnose` | Channels, permission backends, catalog and storage status |
-| `nickname reset <player>` | Reset a player's nickname |
+| `grant <player> <titleId>` | Add a local title ownership record |
+| `revoke <player> <titleId>` | Revoke a local title ownership record |
+| `inspect <player>` | Show the player's state, ownership and equipped titles |
+| `preview <player>` | Resolve the first and second lines without changing state |
+| `reload` | Atomically reload the configuration |
+| `validate` | Validate the configuration file on disk without applying it |
+| `diagnose` | Show channel, permission backend, catalog and storage status |
+| `nickname reset <player>` | Reset the specified player's nickname |
 
-Targets accept a UUID or an exact online player name. Nicknames are never used for lookups.
+Targets can be specified by UUID or exact online player name. Nicknames are not used for player lookups.
 
 ## Permissions
 
 | Node | Default |
 | --- | --- |
-| `fancycrests.menu` | everyone |
-| `fancycrests.equip` | everyone |
-| `fancycrests.nickname.set` | operators; others require an explicit grant |
-| `fancycrests.nickname.bypass_reserved` | operators; others require an explicit grant |
-| `fancycrests.admin.grant` | operators |
-| `fancycrests.admin.revoke` | operators |
-| `fancycrests.admin.inspect` | operators |
-| `fancycrests.admin.preview` | operators |
-| `fancycrests.admin.reload` | operators |
-| `fancycrests.admin.validate` | operators |
-| `fancycrests.admin.diagnose` | operators |
-| `fancycrests.admin.nickname_reset` | operators |
+| `fancycrests.menu` | Everyone |
+| `fancycrests.equip` | Everyone |
+| `fancycrests.nickname.set` | Operators; other players need an explicit grant |
+| `fancycrests.nickname.bypass_reserved` | Operators; other players need an explicit grant |
+| `fancycrests.admin.grant` | Operators |
+| `fancycrests.admin.revoke` | Operators |
+| `fancycrests.admin.inspect` | Operators |
+| `fancycrests.admin.preview` | Operators |
+| `fancycrests.admin.reload` | Operators |
+| `fancycrests.admin.validate` | Operators |
+| `fancycrests.admin.diagnose` | Operators |
+| `fancycrests.admin.nickname_reset` | Operators |
 
-Operators also have the custom permission nodes used by title definitions and
-second-line rule conditions within Fancy Crests. This does not write permissions
-to LuckPerms or grant them to other mods. The vanilla operator list determines
-player status, including lower-level operators and eligible singleplayer owners.
+By default, operators also have the custom permission nodes used by title definitions and second-line rule conditions within Fancy Crests. These permissions only apply within the mod; they are not written to LuckPerms or granted to other mods. A player's operator status is determined by the vanilla operator list, including lower-level operators and eligible singleplayer world owners.
 
-Evaluation order per node: explicit deny → explicit allow → operator access to
-mod nodes → documented default. A deny from any backend overrides any allow or
-operator status. Use the built-in `permissions.nodes` deny list or LuckPerms
-`false` to disable an operator's node. If an operator's external permission data
-is still loading, access waits until its denies can be checked. Online OP changes
-revalidate equipped titles and display state.
+Each node is evaluated in this order: explicit deny → explicit allow → operator access to mod nodes → the default listed above. A deny from any backend takes precedence over an allow or operator status. You can use the built-in `permissions.nodes` deny list or set a node to `false` in LuckPerms to disable a specific node for an operator. If an operator's external permission data is still loading, the system waits until it has loaded and any deny rules can be checked before granting access. When an online player's operator status changes, the mod revalidates their equipped titles and display state.
 
-The nickname bypass node skips reserved-name and other online players' real-name
-checks. Disabling a nickname permission does not erase an existing nickname. A
-title's local ownership grant remains a separate eligibility source, so denying
-its permission does not revoke an existing ownership grant. Console/RCON can run
-admin commands but not player-only commands.
+The nickname bypass node skips reserved-name checks and checks for conflicts with other online players' real names. Disabling the nickname permission does not remove an existing nickname. Similarly, because local title ownership is an independent eligibility source, denying a title's permission node does not revoke existing ownership. The console and RCON can run administrator commands but cannot run player-only commands.
 
 ## Configuration
 
-`config/fancycrests.json` is validated on load and every problem is reported with
-its exact JSON path. Unknown or misspelled fields are **errors**, not silently
-ignored members (`permisson`, `titels` and a segment without `type` used to change
-behaviour quietly). A failed **reload** keeps the previous configuration active.
-A failed **startup** load falls back to the last-known-good copy
-(`fancycrests.json.last-good`, rewritten after every successful full validation);
-if neither copy is usable the server enters **protection mode**: title state
-changes are refused and saved equipment is never unequipped against an unknown
-catalog, so a bad edit cannot wipe existing choices. Fix the file and restart or
-`/fancycrests reload` to leave protection.
+`config/fancycrests.json` is strictly validated when loaded, and any problems are reported with their exact JSON paths. Unknown or misspelled fields are always treated as **errors** and never silently ignored. In the past, typos such as `permisson` and `titels`, or a segment missing its `type`, could silently change configuration behavior and make problems difficult to diagnose. If a **reload** fails, the server keeps using the last active configuration. If loading fails during **startup**, it falls back to the most recent valid backup (`fancycrests.json.last-good`), which is rewritten after every successful full validation. If neither the main file nor the backup is usable, the server enters **protection mode**: title state changes are refused, and saved equipment is not forcibly unequipped against an unknown catalog. This prevents a bad configuration from clearing players' existing choices. Fix the configuration file, then restart the server or run `/fancycrests reload` to leave protection mode.
 
-| Section | Purpose |
+| Configuration section | Purpose |
 | --- | --- |
-| `channels` | Independent switches: `headRender`, `chat`, `tabList`, `placeholdersExport`; optional `headRenderTemplate` / `chatTemplate` / `tabListTemplate` override the global first line per channel (absent = inherit the global template, `[]` = that channel has no first line) |
-| `equipment` | `maxPrefixes` / `maxSuffixes` per player (0–10; `0` disables the slot) |
+| `channels` | Independent switches: `headRender`, `chat`, `tabList`, `placeholdersExport`; optional `headRenderTemplate` / `chatTemplate` / `tabListTemplate` override the global first-line template for each channel (unset means inherit the global template; `[]` means the channel has no first line) |
+| `equipment` | Per-player `maxPrefixes` / `maxSuffixes` limits (0–10; `0` disables the slot) |
 | `nickname` | `maxLength` / `minLength` (1–64), `pattern`, `reservedNames`, `allowSet` |
-| `permissions.nodes` | Built-in backend: per-UUID `allow` / `deny` lists (trailing `.*` wildcards supported) |
-| `firstLineTemplate` | Ordered segments of type `prefixes` / `name` / `suffixes`, each with `separator` and optional `separatorStyle` |
+| `permissions.nodes` | Built-in backend: per-UUID `allow` / `deny` lists (supports wildcards ending in `.*`) |
+| `firstLineTemplate` | Ordered segments of type `prefixes` / `name` / `suffixes`; each can set `separator` and optional `separatorStyle` |
 | `secondLineRules` | `id`, `priority` (0–1000), `condition` (`dimension` / `permission`), `template`, `refreshTicks` (1–72000, default 20) |
-| `render` | `distanceBlocks` (8–128) and the first/second line offsets |
-| `titles` | `id`, `slot` (`prefix`/`suffix`), `displayName`, `text` (`&` codes), `permission`, `category`, `iconItem`, `sortOrder` (0–10000) |
+| `render` | `distanceBlocks` (8–128) and offsets for the first and second lines |
+| `titles` | `id`, `slot` (`prefix`/`suffix`), `displayName`, `text` (`&` color codes), `permission`, `category`, `iconItem`, `sortOrder` (0–10000) |
 
-Add a `presets` array inside the `nickname` section to list selectable nicknames
-in menu order, for example `"presets": ["&aExplorer", "&bBuilder"]`.
-Players with `fancycrests.menu` may select or reset a preset without the custom
-nickname permission. Presets still follow the configured nickname length,
-pattern, reserved-name and player-name checks; `allowSet: false` disables
-selecting and entering nicknames, while reset remains available.
+You can add a `presets` array to the `nickname` section to list selectable nicknames in the order they should appear in the menu, for example: `"presets": ["&aExplorer", "&bBuilder"]`. Players with `fancycrests.menu` can choose a preset or reset their nickname from the menu even without the custom nickname permission. Presets still undergo nickname length, pattern, reserved-name and player-name checks. Setting `allowSet` to `false` disables both preset selection and custom input, but still allows players to reset their nickname.
 
-Titles use a name tag icon by default. Set `iconItem` to a registered item ID,
-such as `minecraft:diamond`, to use a different icon. Equipped titles show an
-enchantment glint; unequipped titles do not.
+Titles use a name tag icon in the menu by default. To change it, set `iconItem` to a registered item ID, such as `minecraft:diamond`. Equipped titles have an enchantment glint in the menu, while unequipped ones do not, making them easy to distinguish.
 
-Numeric fields are parsed exactly from the JSON text: `3.0` is accepted as the
-same integer, while `3.9`, `1e5` and values outside the field's range are errors
-with the exact path. A condition `dimension` without a namespace means the
-vanilla namespace (`overworld` → `minecraft:overworld`); nicknames may not start
-or end with whitespace.
+All numeric fields are parsed exactly from the original JSON text: `3.0` is accepted as the integer `3`, while `3.9`, `1e5` and values outside the allowed range produce an error with the exact path. If a `dimension` condition has no namespace, the vanilla namespace is added automatically (for example, `overworld` → `minecraft:overworld`). Nicknames also cannot begin or end with whitespace.
 
-Titles with a `permission` are only equippable by players who own them locally or
-whose active permission backend allows the node.
+Titles with a `permission` can only be equipped by players who own them locally or are allowed to use the corresponding node by the active permission backend.
 
-## Text formatting
+## Text Formatting
 
-Title text, nickname input, `separatorStyle` and static template text accept classic
-colour codes with the `&` prefix (`&6Gold`, `&lbold`, `&r` resets) — easy to type in
-chat and config. The vanilla `§` prefix still works for existing configs. A doubled
-prefix (`&&`) escapes into a literal `&`, so plain text like `R&&D` stays intact; any
-unknown pair such as `Tom & Jerry` is also kept verbatim.
+Title text, nickname input, `separatorStyle` and static template text all support classic color codes. Use the `&` prefix (for example, `&6Gold`, `&lbold`, and `&r` to reset formatting), which is convenient in chat and configuration files. Existing configurations can continue to use the vanilla `§` prefix. Doubling the prefix as `&&` escapes it to a literal `&`, so `R&&D` displays as written. Unrecognized combinations such as `Tom & Jerry` are also preserved as-is.
 
 ## Placeholders
 
-Second-line templates and the Text Placeholder API export share the same registry:
+Second-line templates and the Text Placeholder API export share the same placeholder registry:
 
 | Placeholder | Value |
 | --- | --- |
-| `%fancycrests:prefix%` | Equipped prefixes joined with the configured separator, empty when none |
-| `%fancycrests:suffix%` | Equipped suffixes joined with the configured separator, empty when none |
-| `%fancycrests:nickname%` | Nickname, otherwise the current profile name |
-| `%fancycrests:belowname%` | Resolved admin second line, empty when no rule matched |
+| `%fancycrests:prefix%` | Equipped prefixes joined with the configured separator; empty when there are none |
+| `%fancycrests:suffix%` | Equipped suffixes joined with the configured separator; empty when there are none |
+| `%fancycrests:nickname%` | Nickname, or the current profile name if unset |
+| `%fancycrests:belowname%` | Resolved administrator second line; empty when no rule matches |
 
 ## Integrations
 
-- **LuckPerms** — when the Fabric mod is present, a `luckperms` backend is registered
-  after the built-in one. Explicit allow/deny wins; undefined nodes fall back to the
-  documented default. Permission changes are re-checked on the main thread, so a revoked
-  title is removed promptly.
-- **Text Placeholder API** — when present, the four placeholders above are exported for
-  chat, TAB or any other consumer. Without it the mod runs unchanged.
-
-## Building
-
-Requires **Java 25** and Git.
-
-```sh
-git clone https://github.com/XiaoQing235/fancy-crests-mod.git
-cd fancy-crests-mod
-./gradlew build
-```
-
-The jar is written to `build/libs/FancyCrests-<version>.jar`.
-
-### Shared local test server
-
-Use `./gradlew runServer --console=plain` (Windows:
-`.\gradlew.bat runServer --console=plain`) for the shared development server. Loom's generated server IDE
-configuration uses the same `run/` working directory and the current project
-classes. Do not also copy a Fancy Crests jar into its `mods/` directory.
-
-Keep the existing shared world and configuration between test sessions. Stop the
-server with the console command `stop` and wait for shutdown before changing
-mods or starting it from another tool. Never run two instances against this
-directory. Reset test data only when explicitly requested.
-
-The locally configured test server has usage notes in `run/README.md`. Its
-configuration, player data, optional mods and control credentials are local only
-and are not distributed with the repository. On a new checkout, create your own
-server configuration and review the Minecraft EULA before accepting it.
+- **LuckPerms**: When Fabric LuckPerms is detected, the mod registers the `luckperms` backend after the built-in backend. Explicit allow or deny rules take precedence; undefined nodes fall back to the defaults described above. Permission changes are rechecked on the main thread so titles that are no longer allowed are removed promptly.
+- **Text Placeholder API**: When detected, the mod exports the four placeholders above for chat, TAB lists or other compatible plugins and mods. Fancy Crests continues to work normally without it.
 
 ## License
 
