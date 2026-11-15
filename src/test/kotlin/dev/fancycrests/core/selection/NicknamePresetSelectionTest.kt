@@ -59,6 +59,12 @@ class NicknamePresetSelectionTest {
         return result.get(5, TimeUnit.SECONDS)
     }
 
+    private fun custom(text: String): SelectionResult {
+        val result = CompletableFuture<SelectionResult>()
+        service.setCustomNickname(uuid, text, "test") { result.complete(it) }
+        return result.get(5, TimeUnit.SECONDS)
+    }
+
     @Test
     fun `preset selection does not grant arbitrary nickname permission`() {
         create()
@@ -77,6 +83,17 @@ class NicknamePresetSelectionTest {
         backend.reload(emptyMap())
         config = config.copy(nickname = config.nickname.copy(allowSet = false))
         assertEquals(RejectionReason.NICKNAME_DISABLED, (select("&aExplorer") as SelectionResult.Rejected).reason)
+    }
+
+    @Test
+    fun `custom nickname requires its own node independently of preset access`() {
+        create()
+        assertEquals(RejectionReason.MISSING_PERMISSION, (custom("Custom") as SelectionResult.Rejected).reason)
+        backend.reload(TestFixtures.config(allow = mapOf(uuid to listOf(Permissions.NICKNAME_SET))).permissions.nodes)
+        assertTrue(custom("Custom") is SelectionResult.Success)
+        backend.reload(TestFixtures.config(deny = mapOf(uuid to listOf(Permissions.NICKNAME_SET))).permissions.nodes)
+        assertEquals(RejectionReason.MISSING_PERMISSION, (custom("Another") as SelectionResult.Rejected).reason)
+        assertTrue(select("&aExplorer") is SelectionResult.Success)
     }
 
     @Test
@@ -101,6 +118,32 @@ class NicknamePresetSelectionTest {
         }
         first.join(5000)
         assertEquals(RejectionReason.NOT_ELIGIBLE, (result.get(5, TimeUnit.SECONDS) as SelectionResult.Rejected).reason)
+        assertEquals("First", service.stateOf(uuid).nickname)
+    }
+
+    @Test
+    fun `custom permission revoked while a request waits is rechecked`() {
+        create()
+        backend.reload(TestFixtures.config(allow = mapOf(uuid to listOf(Permissions.NICKNAME_SET))).permissions.nodes)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        events.addPreListener { event: TitleChangeEventPre ->
+            if (event.type == TitleOperationType.NICKNAME_SET && release.count == 1L) {
+                entered.countDown()
+                release.await()
+            }
+        }
+        val first = Thread { service.setNickname(uuid, "First", "test") {} }.apply { isDaemon = true; start() }
+        val result = CompletableFuture<SelectionResult>()
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            service.setCustomNickname(uuid, "Custom", "test") { result.complete(it) }
+            backend.reload(TestFixtures.config(deny = mapOf(uuid to listOf(Permissions.NICKNAME_SET))).permissions.nodes)
+        } finally {
+            release.countDown()
+        }
+        first.join(5000)
+        assertEquals(RejectionReason.MISSING_PERMISSION, (result.get(5, TimeUnit.SECONDS) as SelectionResult.Rejected).reason)
         assertEquals("First", service.stateOf(uuid).nickname)
     }
 }

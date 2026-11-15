@@ -430,19 +430,26 @@ class SelectionService(
 
     /** Sets the nickname ([text] non-null) or resets it (null). Display-only. */
     fun setNickname(uuid: UUID, text: String?, reason: String, callback: (SelectionResult) -> Unit) {
-        updateNickname(uuid, text, reason, requirePreset = false, callback = callback)
+        updateNickname(uuid, text, reason, NicknameAccess.TRUSTED, callback)
+    }
+
+    /** Sets a player's own custom nickname, rechecking permission when the queued request runs. */
+    fun setCustomNickname(uuid: UUID, text: String, reason: String, callback: (SelectionResult) -> Unit) {
+        updateNickname(uuid, text, reason, NicknameAccess.CUSTOM, callback)
     }
 
     /** Selects a configured nickname without granting permission to enter arbitrary text. */
     fun selectNicknamePreset(uuid: UUID, text: String, reason: String, callback: (SelectionResult) -> Unit) {
-        updateNickname(uuid, text, reason, requirePreset = true, callback = callback)
+        updateNickname(uuid, text, reason, NicknameAccess.PRESET, callback)
     }
+
+    private enum class NicknameAccess { TRUSTED, CUSTOM, PRESET }
 
     private fun updateNickname(
         uuid: UUID,
         text: String?,
         reason: String,
-        requirePreset: Boolean,
+        access: NicknameAccess,
         callback: (SelectionResult) -> Unit,
     ) {
         val deliver = deliverOnce(callback)
@@ -471,17 +478,20 @@ class SelectionService(
             }
 
             val config = configProvider()
-            if (requirePreset) {
-                if (permissions.check(uuid, Permissions.MENU) != PermissionVerdict.ALLOW) {
-                    deliver(SelectionResult.Rejected(RejectionReason.MISSING_PERMISSION, "you lack '${Permissions.MENU}'"))
-                    done()
-                    return@submit
-                }
-                if (text !in config.nickname.presets) {
-                    deliver(SelectionResult.Rejected(RejectionReason.NOT_ELIGIBLE, "nickname preset is no longer available"))
-                    done()
-                    return@submit
-                }
+            val requiredPermission = when (access) {
+                NicknameAccess.TRUSTED -> null
+                NicknameAccess.CUSTOM -> Permissions.NICKNAME_SET
+                NicknameAccess.PRESET -> Permissions.MENU
+            }
+            if (requiredPermission != null && permissions.check(uuid, requiredPermission) != PermissionVerdict.ALLOW) {
+                deliver(SelectionResult.Rejected(RejectionReason.MISSING_PERMISSION, "you lack '$requiredPermission'"))
+                done()
+                return@submit
+            }
+            if (access == NicknameAccess.PRESET && text !in config.nickname.presets) {
+                deliver(SelectionResult.Rejected(RejectionReason.NOT_ELIGIBLE, "nickname preset is no longer available"))
+                done()
+                return@submit
             }
             if (!config.nickname.allowSet) {
                 deliver(SelectionResult.Rejected(RejectionReason.NICKNAME_DISABLED, "nicknames are disabled"))

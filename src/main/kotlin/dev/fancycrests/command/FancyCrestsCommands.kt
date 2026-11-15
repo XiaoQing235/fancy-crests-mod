@@ -251,7 +251,7 @@ object FancyCrestsCommands {
         val player = CommandSupport.requirePlayer(source) ?: return 0
         if (!CommandSupport.requirePermission(source, core, Permissions.NICKNAME_SET)) return 0
         val uuid = player.gameProfile.id()
-        core.selectionService.setNickname(uuid, text, "command") { result ->
+        val callback: (SelectionResult) -> Unit = { result ->
             val success = if (text == null) {
                 "Nickname reset; you are shown as your profile name again."
             } else {
@@ -259,6 +259,8 @@ object FancyCrestsCommands {
             }
             reportResult(source, result, successText = success)
         }
+        if (text == null) core.selectionService.setNickname(uuid, null, "command", callback)
+        else core.selectionService.setCustomNickname(uuid, text, "command", callback)
         return Command.SINGLE_SUCCESS
     }
 

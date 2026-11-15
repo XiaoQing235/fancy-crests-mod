@@ -65,7 +65,7 @@ internal class NicknameInputMenu(
             return
         }
         val nickname = input
-        core.selectionService.setNickname(viewer.uuid, nickname, "menu") { result ->
+        core.selectionService.setCustomNickname(viewer.uuid, nickname, "menu") { result ->
             try {
                 sendNicknameResult(viewer, result, nickname)
                 if (result is SelectionResult.Success && viewer.containerMenu === this) {
