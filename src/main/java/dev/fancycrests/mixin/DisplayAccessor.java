@@ -31,4 +31,9 @@ public interface DisplayAccessor {
     static EntityDataAccessor<Float> fancycrestsViewRangeId() {
         throw new AssertionError();
     }
+
+    @Accessor("DATA_BRIGHTNESS_OVERRIDE_ID")
+    static EntityDataAccessor<Integer> fancycrestsBrightnessOverrideId() {
+        throw new AssertionError();
+    }
 }

@@ -8,6 +8,7 @@ import dev.fancycrests.mixin.DisplayAccessor
 import dev.fancycrests.mixin.TextDisplayAccessor
 import net.minecraft.network.chat.Component
 import net.minecraft.network.syncher.SynchedEntityData
+import net.minecraft.util.Brightness
 import net.minecraft.world.entity.Display
 import org.joml.Vector3f
 
@@ -38,8 +39,14 @@ internal object LabelStyles {
     /** Dimmed plate while sneaking: ~15% black. */
     const val PLATE_SNEAK_ARGB: Int = 0x26000000.toInt()
 
-    /** Fully transparent plate (foreground layer never draws a plate). */
-    const val PLATE_NONE_ARGB: Int = 0x00000000
+    /**
+     * A transparent, nonzero plate makes 26.2 draw foreground text after the
+     * background layer's plate. The client discards its zero-alpha pixels.
+     */
+    const val PLATE_NONE_ARGB: Int = 0x00000001
+
+    /** Keep text colours independent of world lighting, like the menu preview. */
+    val FULL_BRIGHTNESS: Int = Brightness.FULL_BRIGHT.pack()
 
     /** Vanilla default text opacity byte (-1 = fully opaque default). */
     const val TEXT_OPAQUE: Byte = -1
@@ -119,6 +126,9 @@ internal object DisplayMetadata {
             ViewRanges.blocksToViewRange(blocks),
         )
 
+    fun brightnessValue(): SynchedEntityData.DataValue<*> =
+        SynchedEntityData.DataValue.create(DisplayAccessor.fancycrestsBrightnessOverrideId(), LabelStyles.FULL_BRIGHTNESS)
+
     fun textValue(text: Component): SynchedEntityData.DataValue<*> =
         SynchedEntityData.DataValue.create(TextDisplayAccessor.fancycrestsTextId(), text)
 
@@ -140,7 +150,7 @@ internal object DisplayMetadata {
             flagsValue(LabelStyles.flagsOf(layer, sneaking)),
         )
 
-    /** Full initial metadata: content + billboard + translation + view range. */
+    /** Full initial metadata: content + billboard + translation + view range + brightness. */
     fun fullValues(
         layer: LabelLayer,
         snapshot: DisplaySnapshot,
@@ -151,6 +161,7 @@ internal object DisplayMetadata {
             billboardValue(),
             translationValue(LabelStyles.offsetOf(layer, settings)),
             viewRangeValue(settings.renderDistance.blocks),
+            brightnessValue(),
         )
 
     /** Placement-only updates (settings hot reload). */
