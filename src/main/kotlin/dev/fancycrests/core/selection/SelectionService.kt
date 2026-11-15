@@ -40,7 +40,7 @@ enum class RejectionReason {
     LIMIT_REACHED,
     NOT_ELIGIBLE,
 
-    /** The caller lacks the equip/unequip node (checked in the service, not the UI). */
+    /** The caller lacks a permission required by the operation. */
     MISSING_PERMISSION,
     NICKNAME_DISABLED,
     NICKNAME_TOO_SHORT,
@@ -430,6 +430,21 @@ class SelectionService(
 
     /** Sets the nickname ([text] non-null) or resets it (null). Display-only. */
     fun setNickname(uuid: UUID, text: String?, reason: String, callback: (SelectionResult) -> Unit) {
+        updateNickname(uuid, text, reason, requirePreset = false, callback = callback)
+    }
+
+    /** Selects a configured nickname without granting permission to enter arbitrary text. */
+    fun selectNicknamePreset(uuid: UUID, text: String, reason: String, callback: (SelectionResult) -> Unit) {
+        updateNickname(uuid, text, reason, requirePreset = true, callback = callback)
+    }
+
+    private fun updateNickname(
+        uuid: UUID,
+        text: String?,
+        reason: String,
+        requirePreset: Boolean,
+        callback: (SelectionResult) -> Unit,
+    ) {
         val deliver = deliverOnce(callback)
         configProtected()?.let {
             deliver(it)
@@ -456,6 +471,18 @@ class SelectionService(
             }
 
             val config = configProvider()
+            if (requirePreset) {
+                if (permissions.check(uuid, Permissions.MENU) != PermissionVerdict.ALLOW) {
+                    deliver(SelectionResult.Rejected(RejectionReason.MISSING_PERMISSION, "you lack '${Permissions.MENU}'"))
+                    done()
+                    return@submit
+                }
+                if (text !in config.nickname.presets) {
+                    deliver(SelectionResult.Rejected(RejectionReason.NOT_ELIGIBLE, "nickname preset is no longer available"))
+                    done()
+                    return@submit
+                }
+            }
             if (!config.nickname.allowSet) {
                 deliver(SelectionResult.Rejected(RejectionReason.NICKNAME_DISABLED, "nicknames are disabled"))
                 done()

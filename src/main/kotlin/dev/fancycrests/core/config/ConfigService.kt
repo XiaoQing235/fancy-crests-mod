@@ -71,8 +71,10 @@ data class NicknameConfig(
     val minLength: Int,
     val pattern: Pattern,
     val reservedNames: List<String>,
-    /** Global switch; per-player access still requires the permission node. */
+    /** Global switch for custom and preset nickname changes. */
     val allowSet: Boolean,
+    /** Administrator-defined nickname choices, in menu order. */
+    val presets: List<String> = emptyList(),
 ) {
     /** Case-insensitive reserved-name lookup after normalization. */
     fun isReserved(normalized: String): Boolean =
@@ -590,6 +592,15 @@ class ConfigService(
                 errors += ConfigError("nickname.reservedNames[$index]", "must not be blank")
             }
         }
+        val nicknamePresets = HashSet<String>()
+        for ((index, preset) in nickname.presets.withIndex()) {
+            if (LegacyTextParser.strip(preset, knownCodesOnly = true).isBlank()) {
+                errors += ConfigError("nickname.presets[$index]", "must not be blank")
+            }
+            if (!nicknamePresets.add(preset)) {
+                errors += ConfigError("nickname.presets[$index]", "duplicate nickname preset")
+            }
+        }
 
         if (root.firstLineTemplate.isEmpty()) {
             errors += ConfigError("firstLineTemplate", "must contain at least one segment")
@@ -708,7 +719,7 @@ class ConfigService(
             "headRenderTemplate", "chatTemplate", "tabListTemplate",
         )
         val EQUIPMENT = setOf("maxPrefixes", "maxSuffixes")
-        val NICKNAME = setOf("maxLength", "minLength", "pattern", "reservedNames", "allowSet")
+        val NICKNAME = setOf("maxLength", "minLength", "pattern", "reservedNames", "allowSet", "presets")
         val PERMISSIONS = setOf("nodes")
         val NODE_GRANTS = setOf("allow", "deny")
         val TEMPLATE_SEGMENT = setOf("type", "separator", "separatorStyle")
@@ -807,6 +818,7 @@ class ConfigService(
             pattern = pattern,
             reservedNames = nicknameObj.stringList("reservedNames", "nickname.reservedNames", errors),
             allowSet = nicknameObj.boolean("allowSet", true, "nickname.allowSet", errors),
+            presets = nicknameObj.stringList("presets", "nickname.presets", errors),
         )
 
         val permissionsObj = root.optObject("permissions", "permissions", errors)
@@ -1151,6 +1163,7 @@ class ConfigService(
         nickname.addProperty("pattern", config.nickname.pattern.pattern())
         nickname.add("reservedNames", JsonArray().apply { config.nickname.reservedNames.forEach { add(it) } })
         nickname.addProperty("allowSet", config.nickname.allowSet)
+        nickname.add("presets", JsonArray().apply { config.nickname.presets.forEach { add(it) } })
         root.add("nickname", nickname)
 
         root.add("permissions", JsonObject().apply { add("nodes", JsonObject()) })
