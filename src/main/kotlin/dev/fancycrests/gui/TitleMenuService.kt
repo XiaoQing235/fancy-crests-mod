@@ -24,6 +24,13 @@ object TitleMenuService {
     fun open(player: ServerPlayer, core: CoreServices): Boolean = open(player, core, TitleMenuPage.PREFIX)
 
     internal fun open(player: ServerPlayer, core: CoreServices, page: TitleMenuPage): Boolean {
+        if (!canOpen(player, core)) return false
+        player.openMenu(TitleMenuProvider(player, core, page))
+        return true
+    }
+
+    /** Recheck access before opening or switching menu pages. */
+    internal fun canOpen(player: ServerPlayer, core: CoreServices): Boolean {
         if (!core.isStarted) {
             player.sendSystemMessage(
                 Component.literal("Fancy Crests is still starting; try again in a moment.")
@@ -39,7 +46,6 @@ object TitleMenuService {
             )
             return false
         }
-        player.openMenu(TitleMenuProvider(player, core, page))
         return true
     }
 }
@@ -51,7 +57,7 @@ private class TitleMenuProvider(
     private val page: TitleMenuPage,
 ) : MenuProvider {
 
-    override fun getDisplayName(): Component = Component.literal(page.label)
+    override fun getDisplayName(): Component = Component.literal("Fancy Crests")
 
     override fun createMenu(containerId: Int, playerInventory: Inventory, player: Player): AbstractContainerMenu =
         TitleMenu(containerId, playerInventory, viewer, core, page)

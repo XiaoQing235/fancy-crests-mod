@@ -78,7 +78,7 @@ class TitleMenu private constructor(
     playerInventory: Inventory,
     private val viewer: ServerPlayer,
     private val core: CoreServices,
-    private val menuPage: TitleMenuPage,
+    private var menuPage: TitleMenuPage,
     private val backing: SimpleContainer,
 ) : ChestMenu(MenuType.GENERIC_9x6, containerId, playerInventory, backing, ROWS) {
 
@@ -152,7 +152,13 @@ class TitleMenu private constructor(
                     renderPage()
                 }
             }
-            is MenuAction.OpenPage -> TitleMenuService.open(viewer, core, action.page)
+            is MenuAction.OpenPage -> {
+                if (TitleMenuService.canOpen(viewer, core)) {
+                    menuPage = action.page
+                    page = 0
+                    renderPage()
+                }
+            }
             MenuAction.EditNickname -> openNicknameInput()
             MenuAction.ResetNickname -> resetNickname()
             is MenuAction.ToggleTitle -> handleToggle(action)
