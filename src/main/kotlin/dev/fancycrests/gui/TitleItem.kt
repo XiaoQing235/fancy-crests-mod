@@ -33,17 +33,12 @@ internal fun titleItem(
         TitleSlot.SUFFIX -> state.suffixes
     }
     val index = equipped.indexOf(definition.id)
-    val locked = eligibility == Eligibility.NotEligible
-    val fallback = when {
-        locked -> Items.DYE.gray()
-        index >= 0 -> Items.NAME_TAG
-        else -> Items.PAPER
-    }
     val item = definition.iconItem
         ?.let { Identifier.tryParse(it) }
         ?.let { BuiltInRegistries.ITEM.getOptional(it).orElse(null) }
-        ?: fallback
+        ?: Items.NAME_TAG
     val stack = ItemStack(item)
+    stack.set(DataComponents.ENCHANTMENT_GLINT_OVERRIDE, index >= 0)
     val text = titleItemText(definition, state, eligibility, slotLimit)
     stack.set(DataComponents.CUSTOM_NAME, text.name)
     stack.set(DataComponents.LORE, ItemLore(text.lore))

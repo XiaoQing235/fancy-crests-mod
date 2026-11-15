@@ -259,7 +259,7 @@ class TitleMenu private constructor(
 
         val state = core.selectionService.stateOf(viewerUuid)
         actions.clear()
-        val border = ItemStack(Items.STAINED_GLASS_PANE.lightGray()).apply {
+        val border = ItemStack(Items.STAINED_GLASS_PANE.gray()).apply {
             set(DataComponents.TOOLTIP_DISPLAY, TooltipDisplay(true, TooltipDisplay.DEFAULT.hiddenComponents()))
         }
         for (index in 0 until ROWS * 9) {
@@ -280,20 +280,20 @@ class TitleMenu private constructor(
 
         if (menuPage != TitleMenuPage.NICKNAME) {
             val canPrev = page > 0
-            backing.setItem(45, ControlItem(Items.ARROW, "Previous page", canPrev))
+            backing.setItem(45, ControlItem(Items.ARROW, "Previous page", canPrev, showUnavailable = false))
             if (canPrev) actions[45] = MenuAction.PreviousPage
 
             backing.setItem(49, ControlItem(Items.BOOK, "${menuPage.label} — page ${page + 1}/$pages", true))
 
             val canNext = page < pages - 1
-            backing.setItem(53, ControlItem(Items.ARROW, "Next page", canNext))
+            backing.setItem(53, ControlItem(Items.ARROW, "Next page", canNext, showUnavailable = false))
             if (canNext) actions[53] = MenuAction.NextPage
         }
 
         val navigation = listOf(
             Triple(6, TitleMenuPage.PREFIX, Items.GOLD_INGOT),
             Triple(7, TitleMenuPage.SUFFIX, Items.DIAMOND),
-            Triple(8, TitleMenuPage.NICKNAME, Items.NAME_TAG),
+            Triple(8, TitleMenuPage.NICKNAME, Items.EMERALD),
         )
         for ((index, target, item) in navigation) {
             backing.setItem(index, ControlItem(item, target.label, true).copyLore { lore ->
@@ -408,9 +408,10 @@ private fun ControlItem(
     item: net.minecraft.world.item.Item,
     label: String,
     enabled: Boolean,
+    showUnavailable: Boolean = true,
 ): ItemStack {
     val stack = ItemStack(item)
-    val name = Component.literal(if (enabled) label else "$label (unavailable)")
+    val name = Component.literal(if (enabled || !showUnavailable) label else "$label (unavailable)")
     stack.set(DataComponents.CUSTOM_NAME, withoutItalic(name.withStyle(if (enabled) ChatFormatting.WHITE else ChatFormatting.DARK_GRAY)))
     return stack
 }

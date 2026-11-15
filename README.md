@@ -153,6 +153,10 @@ catalog, so a bad edit cannot wipe existing choices. Fix the file and restart or
 | `render` | `distanceBlocks` (8–128) and the first/second line offsets |
 | `titles` | `id`, `slot` (`prefix`/`suffix`), `displayName`, `text` (`&` codes), `permission`, `category`, `iconItem`, `sortOrder` (0–10000) |
 
+Titles use a name tag icon by default. Set `iconItem` to a registered item ID,
+such as `minecraft:diamond`, to use a different icon. Equipped titles show an
+enchantment glint; unequipped titles do not.
+
 Numeric fields are parsed exactly from the JSON text: `3.0` is accepted as the
 same integer, while `3.9`, `1e5` and values outside the field's range are errors
 with the exact path. A condition `dimension` without a namespace means the
