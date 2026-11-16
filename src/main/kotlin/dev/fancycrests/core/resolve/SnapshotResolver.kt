@@ -114,7 +114,11 @@ class SnapshotResolver(
                 previous
             } else {
                 HeadLine(
-                    templateEngine.render(line.content, PlaceholderRequest(state.uuid, observer = null)).component,
+                    templateEngine.renderWithOverrides(
+                        line.content,
+                        PlaceholderRequest(state.uuid, observer = null),
+                        mapOf("display" to firstLine, "belowname" to (secondLine?.second ?: Component.empty())),
+                    ).component,
                     line.seeThrough,
                     line.selfVisible,
                 )

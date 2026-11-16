@@ -135,7 +135,7 @@ To replace the legacy two head lines, add `nametag.lines`. Each line has its own
 ```yaml
 nametag:
   lines:
-    - content: "%fancycrests:prefix% %fancycrests:nickname% %fancycrests:suffix%"
+    - content: "%fancycrests:display%"
       seeThrough: false
       refreshTicks: 20
       selfVisible: true
@@ -145,7 +145,7 @@ nametag:
       selfVisible: false
 ```
 
-`seeThrough` and `selfVisible` default to `false`; `refreshTicks` defaults to 20. Each player's own-visibility preference defaults to on and is saved across restarts. Use the eye in the menu or `/fancycrests nametag on|off` to change it. A player sees their own line only when both their preference and that line's `selfVisible` are enabled. Omitting `nametag` preserves the existing two-line rendering; `lines: []` shows no custom head lines. The existing first and second line offsets determine vertical spacing.
+`%fancycrests:display%` in a head line is the assembled first-line template; `%fancycrests:belowname%` is the current matching legacy second-line rule. `seeThrough` and `selfVisible` default to `false`; `refreshTicks` defaults to 20. Each player's own-visibility preference defaults to on and is saved across restarts. Use the eye in the menu or `/fancycrests nametag on|off` to change it. A player sees their own line only when both their preference and that line's `selfVisible` are enabled. Omitting `nametag` preserves the existing two-line rendering; `lines: []` shows no custom head lines. The existing first and second line offsets determine vertical spacing.
 
 ## Text Formatting
 

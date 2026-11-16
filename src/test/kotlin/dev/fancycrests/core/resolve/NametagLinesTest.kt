@@ -5,6 +5,7 @@ import dev.fancycrests.core.catalog.CatalogService
 import dev.fancycrests.core.config.ConfigService
 import dev.fancycrests.core.config.ConfigYaml
 import dev.fancycrests.core.config.NametagLineConfig
+import dev.fancycrests.core.config.SecondLineRuleConfig
 import dev.fancycrests.core.permission.PermissionManager
 import dev.fancycrests.core.refresh.PlaceholderServiceImpl
 import dev.fancycrests.core.refresh.TemplateEngine
@@ -20,6 +21,23 @@ import kotlin.test.assertTrue
 import net.minecraft.network.chat.Component
 
 class NametagLinesTest {
+    @Test
+    fun `configured line can reuse current legacy display and belowname`() {
+        val uuid = UUID.randomUUID()
+        val adapter = TestFixtures.FakeAdapter()
+        val config = TestFixtures.config().copy(
+            secondLineRules = listOf(SecondLineRuleConfig("below", 1, null, "now")),
+            nametagLines = listOf(NametagLineConfig("%fancycrests:display%/%fancycrests:belowname%", false, 20, true)),
+        )
+        val resolver = SnapshotResolver(
+            CatalogService(config.toTitleDefinitions()), PermissionManager(adapter, emptyList()),
+            { config }, TemplateEngine(PlaceholderServiceImpl()),
+        )
+        val state = dev.fancycrests.api.PlayerTitleState(uuid, emptyList(), emptyList(), null, 0)
+        val display = resolver.resolveFor(null, state, "TestPlayer", null, includeHeadLines = true)
+        assertEquals("TestPlayer/now", display.headLines!!.single().text.string)
+    }
+
     @Test
     fun `scheduler refreshes each line at its configured period`() {
         val uuid = UUID.randomUUID()

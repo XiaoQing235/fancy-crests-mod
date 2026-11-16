@@ -135,7 +135,7 @@
 ```yaml
 nametag:
   lines:
-    - content: "%fancycrests:prefix% %fancycrests:nickname% %fancycrests:suffix%"
+    - content: "%fancycrests:display%"
       seeThrough: false
       refreshTicks: 20
       selfVisible: true
@@ -145,7 +145,7 @@ nametag:
       selfVisible: false
 ```
 
-`seeThrough` 和 `selfVisible` 默认为 `false`，`refreshTicks` 默认为 20。玩家自己的显示开关默认开启，并会跨重启保存；可使用菜单中的末影之眼或 `/fancycrests nametag on|off` 切换。只有个人开关和该行 `selfVisible` 同时开启，本人才能看见该行。不配置 `nametag` 时保留原有两行显示；`lines: []` 则不显示自定义头顶行。现有第一、二行偏移量决定行间距。
+头顶行中的 `%fancycrests:display%` 是按第一行模板拼好的完整内容，`%fancycrests:belowname%` 是当前匹配的旧版第二行规则。`seeThrough` 和 `selfVisible` 默认为 `false`，`refreshTicks` 默认为 20。玩家自己的显示开关默认开启，并会跨重启保存；可使用菜单中的末影之眼或 `/fancycrests nametag on|off` 切换。只有个人开关和该行 `selfVisible` 同时开启，本人才能看见该行。不配置 `nametag` 时保留原有两行显示；`lines: []` 则不显示自定义头顶行。现有第一、二行偏移量决定行间距。
 
 ## 文本格式
 

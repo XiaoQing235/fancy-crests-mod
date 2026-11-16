@@ -107,6 +107,7 @@ class TemplateEngine(
      */
     private val renderDepth = ThreadLocal.withInitial { 0 }
     private val resolvingConditions = ThreadLocal.withInitial { mutableSetOf<String>() }
+    private val scopedPlaceholders = ThreadLocal<Map<String, Component>?>()
 
     /** True while [target]'s second line is being rendered on this thread. */
     fun isSecondLineResolving(target: UUID): Boolean = resolvingSecondLine.get() == target
@@ -136,6 +137,17 @@ class TemplateEngine(
             return renderInner(template, request)
         } finally {
             renderDepth.set(depth)
+        }
+    }
+
+    /** Render with already resolved values for the current head snapshot. */
+    fun renderWithOverrides(template: String, request: PlaceholderRequest, overrides: Map<String, Component>): Result {
+        val previous = scopedPlaceholders.get()
+        scopedPlaceholders.set(overrides)
+        return try {
+            render(template, request)
+        } finally {
+            scopedPlaceholders.set(previous)
         }
     }
 
@@ -178,7 +190,7 @@ class TemplateEngine(
                     }
                     val key = PlaceholderKey(segment.key)
                     val resolved = try {
-                        placeholders.resolve(key, request)
+                        scopedPlaceholders.get()?.get(segment.key) ?: placeholders.resolve(key, request)
                     } catch (t: Throwable) {
                         // A misbehaving resolver must not break rendering.
                         null
