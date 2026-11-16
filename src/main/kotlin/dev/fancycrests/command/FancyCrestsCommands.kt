@@ -54,6 +54,9 @@ object FancyCrestsCommands {
         val root = Commands.literal(rootName)
 
         root.then(Commands.literal("menu").executes { ctx -> runMenu(ctx, core) })
+        root.then(Commands.literal("nametag")
+            .then(Commands.literal("on").executes { ctx -> runOwnNametag(ctx, core, true) })
+            .then(Commands.literal("off").executes { ctx -> runOwnNametag(ctx, core, false) }))
 
         for ((literal, slot) in listOf("prefix" to TitleSlot.PREFIX, "suffix" to TitleSlot.SUFFIX)) {
             root.then(
@@ -213,6 +216,18 @@ object FancyCrestsCommands {
         val player = CommandSupport.requirePlayer(source) ?: return 0
         if (!CommandSupport.requirePermission(source, core, Permissions.MENU)) return 0
         return if (TitleMenuService.open(player, core)) Command.SINGLE_SUCCESS else 0
+    }
+
+    private fun runOwnNametag(ctx: CommandContext<CommandSourceStack>, core: CoreServices, visible: Boolean): Int {
+        val player = CommandSupport.requirePlayer(ctx.source) ?: return 0
+        core.setOwnNametagVisible(player.uuid, visible) { error ->
+            if (error == null) {
+                ctx.source.sendSuccess({ Component.literal("Own nametag ${if (visible) "enabled" else "disabled"}.") }, false)
+            } else {
+                ctx.source.sendFailure(Component.literal("Could not save nametag preference: ${error.message}"))
+            }
+        }
+        return Command.SINGLE_SUCCESS
     }
 
     private fun runEquip(ctx: CommandContext<CommandSourceStack>, core: CoreServices, slot: TitleSlot): Int {

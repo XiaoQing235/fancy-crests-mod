@@ -2,6 +2,7 @@ package dev.fancycrests.core.resolve
 
 import dev.fancycrests.api.DisplaySnapshot
 import dev.fancycrests.api.HeadDisplayChannel
+import dev.fancycrests.api.HeadLine
 import dev.fancycrests.api.PermissionVerdict
 import dev.fancycrests.api.PlaceholderRequest
 import dev.fancycrests.api.PlayerTitleState
@@ -26,6 +27,7 @@ data class ResolvedDisplay(
     val firstLine: Component,
     val secondLine: Component?,
     val matchedRuleId: String?,
+    val headLines: List<HeadLine>? = null,
 )
 
 /**
@@ -95,6 +97,9 @@ class SnapshotResolver(
         state: PlayerTitleState,
         profileName: String,
         dimensionKey: String?,
+        includeHeadLines: Boolean = false,
+        previousHeadLines: List<HeadLine>? = null,
+        refreshHeadLines: Set<Int>? = null,
     ): ResolvedDisplay {
         val config = configProvider()
         val effectiveName = state.nickname ?: profileName
@@ -103,10 +108,23 @@ class SnapshotResolver(
             else -> buildFirstLineFromConfig(channelTemplate, state, catalog, effectiveName)
         }
         val secondLine = matchSecondLine(config.sortedSecondLineRules(), state.uuid, dimensionKey)
+        val headLines = if (includeHeadLines) config.nametagLines?.mapIndexed { index, line ->
+            val previous = previousHeadLines?.getOrNull(index)
+            if (refreshHeadLines != null && index !in refreshHeadLines && previous != null) {
+                previous
+            } else {
+                HeadLine(
+                    templateEngine.render(line.content, PlaceholderRequest(state.uuid, observer = null)).component,
+                    line.seeThrough,
+                    line.selfVisible,
+                )
+            }
+        } else null
         return ResolvedDisplay(
             firstLine = firstLine,
             secondLine = secondLine?.second,
             matchedRuleId = secondLine?.first?.id,
+            headLines = headLines,
         )
     }
 
@@ -273,6 +291,7 @@ class SnapshotPublisher(
     private val adapter: ServerAdapter,
     private val configProvider: () -> FancyCrestsConfig,
     private val channelProvider: () -> HeadDisplayChannel?,
+    private val showOwnNametag: (UUID) -> Boolean = { true },
 ) {
     private val versions = ConcurrentHashMap<UUID, Long>()
     private val views = ConcurrentHashMap<UUID, PublishedPlayerView>()
@@ -302,6 +321,7 @@ class SnapshotPublisher(
             state,
             profileName,
             adapter.dimensionKey(state.uuid),
+            includeHeadLines = true,
         )
         publishResolved(state.uuid, profileName, state, resolved)
     }
@@ -313,7 +333,7 @@ class SnapshotPublisher(
      * new snapshot was published. Resolves through the head channel's
      * template override like [publish].
      */
-    fun publishIfChanged(state: PlayerTitleState): Boolean {
+    fun publishIfChanged(state: PlayerTitleState, refreshHeadLines: Set<Int>? = null): Boolean {
         val profileName = currentProfileName(state.uuid)
         views[state.uuid] = PublishedPlayerView(state.uuid, profileName, state, views[state.uuid]?.snapshot)
         val resolved = resolver.resolveFor(
@@ -321,12 +341,17 @@ class SnapshotPublisher(
             state,
             profileName,
             adapter.dimensionKey(state.uuid),
+            includeHeadLines = true,
+            previousHeadLines = views[state.uuid]?.snapshot?.headLines,
+            refreshHeadLines = refreshHeadLines,
         )
         val previous = views[state.uuid]?.snapshot
         if (previous != null &&
             previous.firstLine == resolved.firstLine &&
             previous.secondLine == resolved.secondLine &&
-            previous.matchedSecondLineRuleId == resolved.matchedRuleId
+            previous.matchedSecondLineRuleId == resolved.matchedRuleId &&
+            previous.headLines == resolved.headLines &&
+            previous.showOwnNametag == showOwnNametag(state.uuid)
         ) {
             return false
         }
@@ -373,6 +398,8 @@ class SnapshotPublisher(
             matchedSecondLineRuleId = resolved.matchedRuleId,
             version = version,
             resolvedAtTick = adapter.currentTick(),
+            headLines = resolved.headLines,
+            showOwnNametag = showOwnNametag(uuid),
         )
         views[uuid] = PublishedPlayerView(uuid, profileName, state, snapshot)
         channelProvider()?.publish(snapshot)

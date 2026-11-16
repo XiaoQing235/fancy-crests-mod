@@ -62,6 +62,7 @@
 | `unequip <prefix\|suffix> all`  | 卸下对应槽位的所有称号                      |
 | `nickname <text>`               | 设置昵称（需要 `fancycrests.nickname.set`） |
 | `nickname reset`                | 清除昵称并恢复显示档案名称                  |
+| `nametag <on\|off>`             | 显示或隐藏允许本人查看的头顶文字            |
 
 点击菜单右上角的按钮，即可在前缀、后缀和昵称界面之间切换。在称号列表里，点击已装备的称号可以将其卸下，点击可用称号则会直接装备。进入昵称菜单后，玩家可以从管理员配置好的预设昵称中进行选择，或是重置昵称；如果想手动输入自定义昵称，则需要拥有 `fancycrests.nickname.set` 权限。需要注意，原版铁砧输入最多只支持 50 个字符（格式代码同样计入长度），如果配置允许更长的昵称，请改用昵称命令来输入。
 
@@ -117,6 +118,7 @@
 | `permissions.nodes` | 内置后端：按 UUID 设置 `allow` / `deny` 列表（支持以 `.*` 结尾的通配符） |
 | `firstLineTemplate` | 按顺序排列的片段，类型为 `prefixes` / `name` / `suffixes`；每段可设 `separator` 和可选的 `separatorStyle` |
 | `secondLineRules`   | `id`、`priority`（0–1000）、`condition`（`dimension` / `permission`）、`template`、`refreshTicks`（1–72000，默认 20） |
+| `nametag.lines`     | 从上到下排列的头顶文字，最多 255 行；每行单独配置 |
 | `render`            | `distanceBlocks`（8–128）以及第一行和第二行的偏移量          |
 | `titles`            | `id`、`slot`（`prefix`/`suffix`）、`displayName`、`text`（`&` 颜色代码）、`permission`、`category`、`iconItem`、`sortOrder`（0–10000） |
 
@@ -127,6 +129,23 @@
 所有数值字段都会进行严格校验：`3.0` 会作为整数 `3` 正常接受，而 `3.9`、`1e5` 以及超出字段允许范围的值都会直接报错，并指出精确路径。`dimension` 条件若未指定命名空间，会自动补全原版命名空间（如 `overworld` → `minecraft:overworld`）；此外，昵称的首尾不能包含空白字符。
 
 带有 `permission` 的称号，仅能由在本地拥有该称号，或被当前权限后端允许使用对应节点的玩家装备。
+
+添加 `nametag.lines` 后，自定义行会替换原有两行头顶显示。每行可以分别设置文本、是否穿墙、刷新间隔（服务器 tick）以及是否允许玩家本人看见：
+
+```yaml
+nametag:
+  lines:
+    - content: "%fancycrests:prefix% %fancycrests:nickname% %fancycrests:suffix%"
+      seeThrough: false
+      refreshTicks: 20
+      selfVisible: true
+    - content: "%condition:example%"
+      seeThrough: true
+      refreshTicks: 40
+      selfVisible: false
+```
+
+`seeThrough` 和 `selfVisible` 默认为 `false`，`refreshTicks` 默认为 20。玩家自己的显示开关默认开启，并会跨重启保存；可使用菜单中的末影之眼或 `/fancycrests nametag on|off` 切换。只有个人开关和该行 `selfVisible` 同时开启，本人才能看见该行。不配置 `nametag` 时保留原有两行显示；`lines: []` 则不显示自定义头顶行。现有第一、二行偏移量决定行间距。
 
 ## 文本格式
 

@@ -18,7 +18,14 @@ data class DisplaySnapshot(
     val version: Long,
     /** Server tick at which this snapshot was resolved. */
     val resolvedAtTick: Long,
+    /** Null retains the legacy two-line display; otherwise lines are top to bottom. */
+    val headLines: List<HeadLine>? = null,
+    /** Player's preference, additionally restricted by each line's selfVisible setting. */
+    val showOwnNametag: Boolean = true,
 )
+
+/** One independently configured head line. */
+data class HeadLine(val text: Component, val seeThrough: Boolean, val selfVisible: Boolean)
 
 /**
  * Channel contract between core (producer) and the head renderer (consumer).

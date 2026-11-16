@@ -62,6 +62,7 @@ The aliases `/names` and `/customnames` behave exactly like `/fancycrests`; use 
 | `unequip <prefix\|suffix> all` | Unequip all titles in the selected slot |
 | `nickname <text>` | Set a nickname (requires `fancycrests.nickname.set`) |
 | `nickname reset` | Clear the nickname and show the profile name again |
+| `nametag <on\|off>` | Show or hide your own permitted nametag lines |
 
 Click the buttons at the top right of the menu to switch between the prefix, suffix and nickname views. In the title list, click an equipped title to unequip it, or an available title to equip it. In the nickname menu, players can choose an administrator-configured preset or reset their nickname. Manually entering a custom nickname requires the `fancycrests.nickname.set` permission. Note that the vanilla anvil input supports at most 50 characters, including formatting codes. If the configuration allows longer nicknames, use the nickname command instead.
 
@@ -117,6 +118,7 @@ On the first start after upgrading, the previous JSON configuration, its last-go
 | `permissions.nodes` | Built-in backend: per-UUID `allow` / `deny` lists (supports wildcards ending in `.*`) |
 | `firstLineTemplate` | Ordered segments of type `prefixes` / `name` / `suffixes`; each can set `separator` and optional `separatorStyle` |
 | `secondLineRules` | `id`, `priority` (0–1000), `condition` (`dimension` / `permission`), `template`, `refreshTicks` (1–72000, default 20) |
+| `nametag.lines` | Up to 255 independently configured head lines, ordered top to bottom |
 | `render` | `distanceBlocks` (8–128) and offsets for the first and second lines |
 | `titles` | `id`, `slot` (`prefix`/`suffix`), `displayName`, `text` (`&` color codes), `permission`, `category`, `iconItem`, `sortOrder` (0–10000) |
 
@@ -127,6 +129,23 @@ Titles use a name tag icon in the menu by default. To change it, set `iconItem` 
 Numeric fields are checked strictly: `3.0` is accepted as the integer `3`, while `3.9`, `1e5` and values outside the allowed range produce an error with the exact path. If a `dimension` condition has no namespace, the vanilla namespace is added automatically (for example, `overworld` → `minecraft:overworld`). Nicknames also cannot begin or end with whitespace.
 
 Titles with a `permission` can only be equipped by players who own them locally or are allowed to use the corresponding node by the active permission backend.
+
+To replace the legacy two head lines, add `nametag.lines`. Each line has its own template, visibility through blocks, refresh period in server ticks and permission to be seen by its owner:
+
+```yaml
+nametag:
+  lines:
+    - content: "%fancycrests:prefix% %fancycrests:nickname% %fancycrests:suffix%"
+      seeThrough: false
+      refreshTicks: 20
+      selfVisible: true
+    - content: "%condition:example%"
+      seeThrough: true
+      refreshTicks: 40
+      selfVisible: false
+```
+
+`seeThrough` and `selfVisible` default to `false`; `refreshTicks` defaults to 20. Each player's own-visibility preference defaults to on and is saved across restarts. Use the eye in the menu or `/fancycrests nametag on|off` to change it. A player sees their own line only when both their preference and that line's `selfVisible` are enabled. Omitting `nametag` preserves the existing two-line rendering; `lines: []` shows no custom head lines. The existing first and second line offsets determine vertical spacing.
 
 ## Text Formatting
 

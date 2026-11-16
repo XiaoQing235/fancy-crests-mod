@@ -52,6 +52,7 @@ class RefreshScheduler(
 
     /** rule id -> refresh period (dynamic rules only). Main-thread mutated. */
     private var rulePeriods: Map<String, Int> = emptyMap()
+    private var linePeriods: Map<Int, Int> = emptyMap()
 
     /** period -> tick at which the group is due next. Main-thread mutated. */
     private val nextDue = TreeMap<Int, Long>()
@@ -73,18 +74,22 @@ class RefreshScheduler(
         } else {
             emptyMap()
         }
+        linePeriods = if (config.channels.headRender) {
+            config.nametagLines.orEmpty().mapIndexed { index, line -> index to line.refreshTicks }.toMap()
+        } else emptyMap()
         nextDue.clear()
         val now = adapter.currentTick()
-        for (period in rulePeriods.values.distinct()) {
+        for (period in (rulePeriods.values + linePeriods.values).distinct()) {
             nextDue[period] = now + period
         }
-        active.set(rulePeriods.isNotEmpty())
+        active.set(nextDue.isNotEmpty())
     }
 
     /** Stops all periodic work and releases the tick hook. */
     fun stop() {
         active.set(false)
         rulePeriods = emptyMap()
+        linePeriods = emptyMap()
         nextDue.clear()
         try {
             tickHandle.close()
@@ -94,7 +99,7 @@ class RefreshScheduler(
     }
 
     private fun onTick() {
-        if (!active.get() || rulePeriods.isEmpty()) return
+        if (!active.get() || nextDue.isEmpty()) return
         // This runs inside END_SERVER_TICK: nothing here may ever throw,
         // or a single failing refresh takes the whole server down.
         try {
@@ -116,7 +121,8 @@ class RefreshScheduler(
 
     private fun refreshGroup(period: Int) {
         val ruleIds = rulePeriods.filterValues { it == period }.keys
-        if (ruleIds.isEmpty()) return
+        val lines = linePeriods.filterValues { it == period }.keys
+        if (ruleIds.isEmpty() && lines.isEmpty()) return
         for (uuid in adapter.onlinePlayerUuids()) {
             try {
                 val matched = resolver.matchedRule(uuid, adapter.dimensionKey(uuid))
@@ -128,11 +134,11 @@ class RefreshScheduler(
                     // becomes null). Players without a published view are
                     // skipped — there is nothing to clear and re-resolving
                     // every period would be pure busy work.
-                    if (publisher.latestView(uuid)?.snapshot != null) {
-                        publisher.publishIfChanged(stateOf(uuid))
+                    if ((ruleIds.isNotEmpty() || lines.isNotEmpty()) && publisher.latestView(uuid)?.snapshot != null) {
+                        publisher.publishIfChanged(stateOf(uuid), lines)
                     }
-                } else if (matched.id in ruleIds) {
-                    publisher.publishIfChanged(stateOf(uuid))
+                } else if (matched.id in ruleIds || lines.isNotEmpty()) {
+                    publisher.publishIfChanged(stateOf(uuid), lines)
                 }
             } catch (t: Throwable) {
                 // One player's failure (e.g. a LuckPerms backend throwing in

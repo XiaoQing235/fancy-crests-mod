@@ -3,6 +3,7 @@ package dev.fancycrests.render
 import dev.fancycrests.api.RenderOffset
 import dev.fancycrests.api.RenderSettings
 import dev.fancycrests.api.DisplaySnapshot
+import dev.fancycrests.api.HeadLine
 import dev.fancycrests.mixin.BillboardConstraintsAccessor
 import dev.fancycrests.mixin.DisplayAccessor
 import dev.fancycrests.mixin.TextDisplayAccessor
@@ -144,10 +145,19 @@ internal object DisplayMetadata {
     /** Content values that change with snapshot text or sneak state. */
     fun contentValues(layer: LabelLayer, snapshot: DisplaySnapshot, sneaking: Boolean): List<SynchedEntityData.DataValue<*>> =
         listOf(
-            textValue(LabelStyles.textOf(layer, snapshot, sneaking)),
-            plateValue(LabelStyles.plateOf(layer, sneaking)),
+            textValue(if (snapshot.headLines != null) Component.empty() else LabelStyles.textOf(layer, snapshot, sneaking)),
+            plateValue(if (snapshot.headLines != null) LabelStyles.PLATE_NONE_ARGB else LabelStyles.plateOf(layer, sneaking)),
             textOpacityValue(LabelStyles.textOpacityOf(layer, sneaking)),
             flagsValue(LabelStyles.flagsOf(layer, sneaking)),
+        )
+
+    fun customLineValues(line: HeadLine, sneaking: Boolean, offset: RenderOffset, settings: RenderSettings): List<SynchedEntityData.DataValue<*>> =
+        listOf(
+            textValue(line.text),
+            plateValue(if (sneaking) LabelStyles.PLATE_SNEAK_ARGB else LabelStyles.PLATE_NORMAL_ARGB),
+            textOpacityValue(if (sneaking) LabelStyles.TEXT_LINE2_SNEAK else LabelStyles.TEXT_OPAQUE),
+            flagsValue(if (line.seeThrough) LabelStyles.FLAG_SEE_THROUGH else LabelStyles.FLAG_NONE),
+            billboardValue(), translationValue(offset), viewRangeValue(settings.renderDistance.blocks), brightnessValue(),
         )
 
     /** Full initial metadata: content + billboard + translation + view range + brightness. */

@@ -103,6 +103,7 @@ class CoreServices(
     private lateinit var channelManager: dev.fancycrests.core.channel.ChannelManager
 
     private lateinit var storage: SqliteStorage
+    private val ownNametagPreferences = java.util.concurrent.ConcurrentHashMap<UUID, Boolean>()
 
     /** The adapter injected at [start]; used by the command layer. */
     lateinit var serverAdapter: ServerAdapter
@@ -179,6 +180,7 @@ class CoreServices(
             adapter,
             { configService.current },
             headChannelProvider,
+            { uuid -> ownNametagPreferences[uuid] ?: true },
         )
         // Built-in placeholders read published immutable state only; the
         // state lookup defers to selectionService, which is created below.
@@ -209,6 +211,8 @@ class CoreServices(
             logger.error("Persistence disabled: could not open database", e)
             dev.fancycrests.core.storage.SqliteStorage.LoadedData(emptyMap(), emptyList())
         }
+        ownNametagPreferences.clear()
+        ownNametagPreferences.putAll(loaded.showOwnNametag)
 
         // ---- selection -------------------------------------------------
         selectionService = SelectionService(
@@ -303,6 +307,19 @@ class CoreServices(
     /** Hot reload entry point (also used by /fancycrests reload). */
     fun reloadAsync(callback: (ConfigLoadResult) -> Unit) {
         configService.reloadAsync(callback)
+    }
+
+    /** Persist a player's own-visibility preference before publishing it. */
+    fun ownNametagVisible(uuid: UUID): Boolean = ownNametagPreferences[uuid] ?: true
+
+    fun setOwnNametagVisible(uuid: UUID, visible: Boolean, callback: (Exception?) -> Unit) {
+        storage.enqueueSavePreference(uuid, visible) { error ->
+            if (error == null) {
+                ownNametagPreferences[uuid] = visible
+                if (uuid in serverAdapter.onlinePlayerUuids()) snapshotPublisher.publish(selectionService.stateOf(uuid))
+            }
+            callback(error)
+        }
     }
 
     /** Login hook for the integration layer. */

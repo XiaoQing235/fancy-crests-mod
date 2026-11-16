@@ -42,6 +42,8 @@ private sealed interface MenuAction {
 
     data object ResetNickname : MenuAction
 
+    data object ToggleOwnNametag : MenuAction
+
     data class SelectNickname(val text: String) : MenuAction
 }
 
@@ -163,6 +165,7 @@ class TitleMenu private constructor(
             }
             MenuAction.EditNickname -> openNicknameInput()
             MenuAction.ResetNickname -> resetNickname()
+            MenuAction.ToggleOwnNametag -> toggleOwnNametag()
             is MenuAction.SelectNickname -> selectNickname(action.text)
             is MenuAction.ToggleTitle -> handleToggle(action)
         }
@@ -290,6 +293,14 @@ class TitleMenu private constructor(
 
         if (menuPage == TitleMenuPage.NICKNAME) renderNicknamePage(state)
 
+        val ownVisible = core.ownNametagVisible(viewerUuid)
+        backing.setItem(5, ControlItem(Items.ENDER_EYE, "Own nametag", true).copyLore { lore ->
+            lore += Component.literal(if (ownVisible) "Visible where allowed" else "Hidden")
+                .withStyle(if (ownVisible) ChatFormatting.GREEN else ChatFormatting.RED)
+            lore += Component.literal("Click to change").withStyle(ChatFormatting.GRAY)
+        })
+        actions[5] = MenuAction.ToggleOwnNametag
+
         val canPrev = page > 0
         backing.setItem(45, ControlItem(Items.ARROW, "Previous page", canPrev, showUnavailable = false))
         if (canPrev) actions[45] = MenuAction.PreviousPage
@@ -349,6 +360,21 @@ class TitleMenu private constructor(
             ).withStyle(if (canReset) ChatFormatting.RED else ChatFormatting.GRAY)
         })
         if (canReset) actions[47] = MenuAction.ResetNickname
+    }
+
+    private fun toggleOwnNametag() {
+        if (!clickInFlight.compareAndSet(false, true)) return
+        if (!TitleMenuService.canOpen(viewer, core)) {
+            clickInFlight.set(false)
+            return
+        }
+        core.setOwnNametagVisible(viewerUuid, !core.ownNametagVisible(viewerUuid)) { error ->
+            if (error != null) viewer.sendSystemMessage(
+                Component.literal("Could not save nametag preference: ${error.message}").withStyle(ChatFormatting.RED),
+            )
+            clickInFlight.set(false)
+            (viewer.containerMenu as? TitleMenu)?.renderPage()
+        }
     }
 
     private fun openNicknameInput() {

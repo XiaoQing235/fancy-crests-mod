@@ -252,6 +252,7 @@ internal class RenderService(initialSettings: RenderSettings) {
                 spawnLabels(observer.connection, state, target, player)
             }
         }
+        ensureOwnLabels(target, player)
     }
 
     /**
@@ -370,6 +371,7 @@ internal class RenderService(initialSettings: RenderSettings) {
         if (target.labelIds.secondLineId != 0) {
             RenderDiagnostics.virtualEntities.decrementAndGet()
         }
+        RenderDiagnostics.virtualEntities.addAndGet(-target.labelIds.customLines.size)
         target.labelIds.invalidate()
     }
 
@@ -579,7 +581,7 @@ internal class RenderService(initialSettings: RenderSettings) {
                 val observer = pending.listener.player
                 if (observer.level() !== player.level()) return
                 val chunkMap = player.level().getChunkSource().chunkMap
-                if (!isTracking(chunkMap, observer, player.id)) {
+                if (observer.uuid != player.uuid && !isTracking(chunkMap, observer, player.id)) {
                     // Relation ended (a STOP event cleaned nothing because
                     // the failed spawn never recorded state); spawning labels
                     // for an untracked entity would freeze them client-side.
@@ -740,6 +742,7 @@ internal class RenderService(initialSettings: RenderSettings) {
             if (target.currentEntityId != player.id) {
                 onTargetEntityReplaced(player)
             }
+            ensureOwnLabels(target, player)
             if (target.observerCount.get() <= 0) continue
             val sneaking = player.isShiftKeyDown
             val realPassengers = player.passengers.map { it.id }
@@ -754,6 +757,7 @@ internal class RenderService(initialSettings: RenderSettings) {
                         if (sneaking != obs.sentSneaking) {
                             obs.sentSneaking = sneaking
                             sendContent(listener, obs, target, layers = LabelLayer.entries)
+                            syncCustomLines(listener, obs, target, player)
                         }
                         if (passengersChanged && sendMergedPassengers(listener, obs, realPassengers)) {
                             // Advance the observer cache only on a delivered
@@ -823,6 +827,100 @@ internal class RenderService(initialSettings: RenderSettings) {
     // Label spawn / cleanup primitives
     // =================================================================
 
+    private fun ownLabelsAllowed(snapshot: DisplaySnapshot): Boolean =
+        snapshot.showOwnNametag && snapshot.headLines?.any { it.selfVisible } == true
+
+    private fun ensureOwnLabels(target: TargetRenderState, player: ServerPlayer) {
+        if (!ownLabelsAllowed(target.snapshot)) return
+        val state = attachConnection(player.connection, flushInit = true)
+        synchronized(state.lock) {
+            if (state.targets[target.uuid] == null) spawnLabels(player.connection, state, target, player)
+        }
+    }
+
+    /** Synchronize independently configured lines while retaining the normal passenger lifecycle. */
+    private fun syncCustomLines(
+        listener: ServerGamePacketListenerImpl,
+        obs: ObserverTargetState,
+        target: TargetRenderState,
+        player: ServerPlayer,
+    ) {
+        val lines = target.snapshot.headLines.orEmpty()
+        val isSelf = listener.player.uuid == target.uuid
+        val desired = CustomLineLayout.visibleIndices(lines, isSelf, target.snapshot.showOwnNametag)
+        val removed = obs.customLines.keys.filter { it !in desired }
+        if (removed.isNotEmpty()) {
+            val old = removed.associateWith { obs.customLines.remove(it)!! }
+            if (!sendMergedPassengers(listener, obs, obs.lastRealPassengers)) {
+                obs.customLines.putAll(old)
+                return
+            }
+            try {
+                sendPacket(listener, ClientboundRemoveEntitiesPacket(*old.values.map { it.id }.toIntArray()))
+            } catch (e: Exception) {
+                obs.customLines.putAll(old)
+                RenderDiagnostics.recordError("custom line removal", e)
+                markResendPending(listener, target.uuid)
+                return
+            }
+        }
+
+        fun offset(index: Int) = CustomLineLayout.offset(index, lines.size, settings)
+
+        val added = desired.filter { it !in obs.customLines }
+        if (added.isNotEmpty()) {
+            val position = player.position()
+            val packets = ArrayList<net.minecraft.network.protocol.Packet<*>>(added.size * 2)
+            val newStates = LinkedHashMap<Int, CustomLineState>()
+            for (index in added) {
+                val id = target.labelIds.customLine(index) { player.level().getNextEntityId() }
+                val placement = offset(index)
+                packets += ClientboundAddEntityPacket(
+                    id.id, id.uuid, position.x, position.y, position.z, 0f, 0f,
+                    EntityTypes.TEXT_DISPLAY, 0, Vec3.ZERO, 0.0,
+                )
+                packets += ClientboundSetEntityDataPacket(
+                    id.id, DisplayMetadata.customLineValues(lines[index], obs.sentSneaking, placement, settings),
+                )
+                newStates[index] = CustomLineState(id.id, lines[index], placement, obs.sentSneaking, settings.renderDistance.blocks)
+            }
+            try {
+                RenderPackets.sendAll(listener, packets)
+                obs.customLines.putAll(newStates)
+                if (!sendMergedPassengers(listener, obs, obs.lastRealPassengers)) {
+                    throw IllegalStateException("custom line mount failed")
+                }
+                RenderDiagnostics.entitiesSent.addAndGet(added.size.toLong())
+            } catch (e: Exception) {
+                newStates.keys.forEach { obs.customLines.remove(it) }
+                runCatching { sendPacket(listener, ClientboundRemoveEntitiesPacket(*newStates.values.map { it.id }.toIntArray())) }
+                RenderDiagnostics.recordError("custom line spawn", e)
+                markResendPending(listener, target.uuid)
+                return
+            }
+        }
+        for (index in desired) {
+            val current = obs.customLines[index] ?: continue
+            val placement = offset(index)
+            val line = lines[index]
+            if (current.line == line && current.offset == placement && current.sneaking == obs.sentSneaking &&
+                current.viewRange == settings.renderDistance.blocks) continue
+            try {
+                sendPacket(listener, ClientboundSetEntityDataPacket(
+                    current.id, DisplayMetadata.customLineValues(line, obs.sentSneaking, placement, settings),
+                ))
+                current.line = line
+                current.offset = placement
+                current.sneaking = obs.sentSneaking
+                current.viewRange = settings.renderDistance.blocks
+            } catch (e: Exception) {
+                RenderDiagnostics.recordError("custom line update", e)
+                markResendPending(listener, target.uuid)
+                return
+            }
+        }
+    }
+
     private fun spawnLabels(
         listener: ServerGamePacketListenerImpl,
         state: ConnectionRenderState,
@@ -838,7 +936,7 @@ internal class RenderService(initialSettings: RenderSettings) {
         if (target.labelIds.allocateFirstLine({ level.getNextEntityId() })) {
             RenderDiagnostics.virtualEntities.addAndGet(2)
         }
-        val wantSecondLine = target.snapshot.secondLine != null
+        val wantSecondLine = target.snapshot.headLines == null && target.snapshot.secondLine != null
         if (wantSecondLine && target.labelIds.allocateSecondLine({ level.getNextEntityId() })) {
             RenderDiagnostics.virtualEntities.incrementAndGet()
         }
@@ -928,7 +1026,8 @@ internal class RenderService(initialSettings: RenderSettings) {
         obs.lastRealPassengers = realPassengers
         obs.sentSneaking = sneaking
         obs.sentFirstLine = target.snapshot.firstLine
-        obs.sentSecondLine = target.snapshot.secondLine
+        obs.sentSecondLine = if (wantSecondLine) target.snapshot.secondLine else null
+        obs.customMode = target.snapshot.headLines != null
         obs.sentFirstLineOffset = settings.firstLineOffset
         obs.sentSecondLineOffset = settings.secondLineOffset
         obs.sentViewRangeBlocks = settings.renderDistance.blocks
@@ -947,6 +1046,7 @@ internal class RenderService(initialSettings: RenderSettings) {
                 spawnPackets + metadataPackets + listOf(mount),
             )
             RenderDiagnostics.entitiesSent.addAndGet(spawnPackets.size.toLong())
+            syncCustomLines(listener, obs, target, player)
         } catch (t: Exception) {
             // Send failed: do not keep the labels recorded as generated.
             RenderDiagnostics.recordError("label spawn", t)
@@ -1077,9 +1177,10 @@ internal class RenderService(initialSettings: RenderSettings) {
         obs: ObserverTargetState,
         target: TargetRenderState,
         layers: List<LabelLayer>,
-    ) {
+    ): Boolean {
         var firstLineDelivered = false
         var secondLineDelivered = false
+        var succeeded = true
         for (layer in layers) {
             val id = when (layer) {
                 LabelLayer.FIRST_FOREGROUND -> obs.foregroundId
@@ -1095,6 +1196,7 @@ internal class RenderService(initialSettings: RenderSettings) {
             } catch (t: Exception) {
                 RenderDiagnostics.recordError("content update", t)
                 markResendPending(listener, obs.targetUuid)
+                succeeded = false
                 break
             }
             when (layer) {
@@ -1104,6 +1206,7 @@ internal class RenderService(initialSettings: RenderSettings) {
         }
         if (firstLineDelivered) obs.sentFirstLine = target.snapshot.firstLine
         if (secondLineDelivered) obs.sentSecondLine = target.snapshot.secondLine
+        return succeeded
     }
 
     private fun pushPlacement(
@@ -1146,6 +1249,9 @@ internal class RenderService(initialSettings: RenderSettings) {
         obs.sentFirstLineOffset = settings.firstLineOffset
         obs.sentSecondLineOffset = settings.secondLineOffset
         obs.sentViewRangeBlocks = settings.renderDistance.blocks
+        val target = targets[obs.targetUuid]
+        val player = server?.playerList?.getPlayer(obs.targetUuid)
+        if (target != null && player != null) syncCustomLines(listener, obs, target, player)
     }
 
     /**
@@ -1154,8 +1260,19 @@ internal class RenderService(initialSettings: RenderSettings) {
      */
     private fun pushSnapshot(target: TargetRenderState) {
         for ((listener, state) in connections) {
-            synchronized(state.lock) { pushSnapshotToObserver(listener, state, target) }
+            synchronized(state.lock) {
+                if (listener.player.uuid == target.uuid && !ownLabelsAllowed(target.snapshot)) {
+                    val obs = state.targets.remove(target.uuid)
+                    if (obs != null) {
+                        cleanupLabels(listener, obs, obs.targetEntityId, obs.lastRealPassengers)
+                        adjustRelation(target, -1)
+                    }
+                } else {
+                    pushSnapshotToObserver(listener, state, target)
+                }
+            }
         }
+        server?.playerList?.getPlayer(target.uuid)?.let { ensureOwnLabels(target, it) }
     }
 
     /**
@@ -1190,11 +1307,14 @@ internal class RenderService(initialSettings: RenderSettings) {
         val settings = this.settings
         val obs = state.targets[target.uuid] ?: return
         if (obs.worldGeneration != state.worldGeneration) return
-        val firstChanged = obs.sentFirstLine != target.snapshot.firstLine
+        val modeChanged = obs.customMode != (target.snapshot.headLines != null)
+        val firstChanged = obs.sentFirstLine != target.snapshot.firstLine || modeChanged
         val secondBefore = obs.sentSecondLine
-        val secondNow = target.snapshot.secondLine
+        val secondNow = if (target.snapshot.headLines == null) target.snapshot.secondLine else null
         if (firstChanged) {
-            sendContent(listener, obs, target, listOf(LabelLayer.FIRST_FOREGROUND, LabelLayer.FIRST_BACKGROUND))
+            if (sendContent(listener, obs, target, listOf(LabelLayer.FIRST_FOREGROUND, LabelLayer.FIRST_BACKGROUND))) {
+                obs.customMode = target.snapshot.headLines != null
+            }
         }
         when (SecondLineDiff.actionOf(secondBefore, secondNow)) {
             SecondLineAction.ADD -> {
@@ -1302,6 +1422,7 @@ internal class RenderService(initialSettings: RenderSettings) {
             }
             SecondLineAction.NONE -> {}
         }
+        server?.playerList?.getPlayer(target.uuid)?.let { syncCustomLines(listener, obs, target, it) }
     }
 
     // =================================================================

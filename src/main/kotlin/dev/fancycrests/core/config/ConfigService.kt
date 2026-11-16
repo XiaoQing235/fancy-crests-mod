@@ -109,6 +109,14 @@ data class NamedConditionConfig(
     val whenFalse: String,
 )
 
+/** A head line, ordered top to bottom in nametag.lines. */
+data class NametagLineConfig(
+    val content: String,
+    val seeThrough: Boolean,
+    val refreshTicks: Int,
+    val selfVisible: Boolean,
+)
+
 /**
  * Admin-configured second-line rule. The template mixes static text (& codes)
  * with built-in `%fancycrests:key%` placeholders; [refreshTicks] controls how
@@ -182,6 +190,8 @@ data class FancyCrestsConfig(
     val render: RenderConfig,
     val titles: List<TitleConfig>,
     val conditions: Map<String, NamedConditionConfig> = emptyMap(),
+    /** Null means the legacy first/second line; a list explicitly replaces them. */
+    val nametagLines: List<NametagLineConfig>? = null,
 ) {
     /** Builds the immutable catalog entries (text parsed to Components). */
     fun toTitleDefinitions(): Map<TitleId, TitleDefinition> {
@@ -675,6 +685,18 @@ class ConfigService(
         }
         for (name in root.conditions.keys) visitCondition(name, emptySet())
 
+        root.nametagLines?.let { lines ->
+            if (lines.size > 255) errors += ConfigError("nametag.lines", "must contain at most 255 lines")
+            for ((index, line) in lines.withIndex()) {
+                if (line.content.length > SecondLineRuleConfig.MAX_TEMPLATE_LENGTH) {
+                    errors += ConfigError("nametag.lines[$index].content", "must not exceed 1024 characters")
+                }
+                if (line.refreshTicks !in SecondLineRuleConfig.MIN_REFRESH_TICKS..SecondLineRuleConfig.MAX_REFRESH_TICKS) {
+                    errors += ConfigError("nametag.lines[$index].refreshTicks", "must be between 1 and 72000")
+                }
+            }
+        }
+
         val render = root.render
         if (!render.distanceBlocks.isFinite() || render.distanceBlocks !in NumericBounds.DISTANCE_BLOCKS) {
             errors += ConfigError(
@@ -751,7 +773,7 @@ class ConfigService(
     private object KnownKeys {
         val ROOT = setOf(
             "channels", "equipment", "nickname", "permissions",
-            "firstLineTemplate", "secondLineRules", "render", "titles", "conditions",
+            "firstLineTemplate", "secondLineRules", "render", "titles", "conditions", "nametag",
         )
         val CHANNELS = setOf(
             "headRender", "chat", "tabList", "placeholdersExport",
@@ -766,6 +788,8 @@ class ConfigService(
         val RULE = setOf("id", "priority", "condition", "template", "refreshTicks")
         val CONDITION = setOf("dimension", "permission")
         val NAMED_CONDITION = setOf("conditions", "type", "true", "false")
+        val NAMETAG = setOf("lines")
+        val NAMETAG_LINE = setOf("content", "seeThrough", "refreshTicks", "selfVisible")
         val RENDER = setOf("distanceBlocks", "firstLineOffset", "secondLineOffset")
         val OFFSET = setOf("x", "y", "z")
         val TITLE = setOf(
@@ -958,6 +982,28 @@ class ConfigService(
             )
         }
 
+        val nametagLines = if (root.has("nametag")) {
+            val nametag = root.optObject("nametag", "nametag", errors)
+            nametag.rejectUnknownKeys("nametag", KnownKeys.NAMETAG, errors)
+            if (!nametag.has("lines")) errors += ConfigError("nametag.lines", "is required")
+            nametag.optArray("lines", "nametag.lines", errors).mapIndexedNotNull { index, element ->
+                val path = "nametag.lines[$index]"
+                if (!element.isJsonObject) {
+                    errors += ConfigError(path, "must be a mapping")
+                    null
+                } else {
+                    val line = element.asJsonObject
+                    line.rejectUnknownKeys(path, KnownKeys.NAMETAG_LINE, errors)
+                    NametagLineConfig(
+                        content = line.requiredString("content", "$path.content", errors) ?: "",
+                        seeThrough = line.boolean("seeThrough", false, "$path.seeThrough", errors),
+                        refreshTicks = line.strictInt("refreshTicks", 20, "$path.refreshTicks", errors, 1..72000),
+                        selfVisible = line.boolean("selfVisible", false, "$path.selfVisible", errors),
+                    )
+                }
+            }
+        } else null
+
         val renderObj = root.optObject("render", "render", errors)
         renderObj.rejectUnknownKeys("render", KnownKeys.RENDER, errors)
         val distanceBlocks = renderObj.double("distanceBlocks", 48.0, "render.distanceBlocks", errors)
@@ -1019,7 +1065,7 @@ class ConfigService(
         if (errors.isNotEmpty()) {
             throw ConfigParseException(errors)
         }
-        return FancyCrestsConfig(channels, equipment, nickname, PermissionsConfig(nodes), template, rules, render, titles, namedConditions)
+        return FancyCrestsConfig(channels, equipment, nickname, PermissionsConfig(nodes), template, rules, render, titles, namedConditions, nametagLines)
     }
 
     private fun JsonObject.optObject(member: String, path: String, errors: MutableList<ConfigError>): JsonObject {

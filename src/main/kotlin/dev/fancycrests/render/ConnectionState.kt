@@ -1,6 +1,7 @@
 ﻿package dev.fancycrests.render
 
 import dev.fancycrests.api.DisplaySnapshot
+import dev.fancycrests.api.HeadLine
 import dev.fancycrests.api.RenderOffset
 import net.minecraft.network.chat.Component
 import net.minecraft.network.protocol.Packet
@@ -69,13 +70,26 @@ internal class ObserverTargetState(
     /** Last real passenger ids seen for the vehicle on this connection. */
     @JvmField var lastRealPassengers: List<Int> = emptyList(),
 ) {
+    /** Configured line index -> entity and last delivered content. */
+    val customLines = LinkedHashMap<Int, CustomLineState>()
+    var customMode: Boolean = false
     /** Entity ids of the label entities currently generated on this connection. */
     fun liveLabelIds(): List<Int> = buildList {
         add(foregroundId)
         add(backgroundId)
         if (secondLineId != 0) add(secondLineId)
+        customLines.values.forEach { add(it.id) }
     }
 }
+
+internal data class CustomLineState(
+    val id: Int,
+    var line: HeadLine,
+    var offset: RenderOffset,
+    var sneaking: Boolean,
+    var viewRange: Double,
+)
+internal data class CustomLineId(val id: Int, val uuid: UUID)
 
 /**
  * Target-side shared label allocation: entity ids and UUIDs for the (up to)
@@ -85,6 +99,15 @@ internal class ObserverTargetState(
  * invalidates every observer-side instance referencing the old cycle.
  */
 internal class LabelEntityIds {
+    val customLines = mutableListOf<CustomLineId>()
+
+    fun customLine(index: Int, allocator: () -> Int): CustomLineId {
+        while (customLines.size <= index) {
+            customLines += CustomLineId(allocator(), UUID.randomUUID())
+            RenderDiagnostics.virtualEntities.incrementAndGet()
+        }
+        return customLines[index]
+    }
     @JvmField var foregroundId: Int = 0
     @JvmField var backgroundId: Int = 0
     @JvmField var secondLineId: Int = 0
@@ -116,6 +139,7 @@ internal class LabelEntityIds {
     fun invalidate() {
         allocatedFirstLine = false
         secondLineId = 0
+        customLines.clear()
     }
 }
 

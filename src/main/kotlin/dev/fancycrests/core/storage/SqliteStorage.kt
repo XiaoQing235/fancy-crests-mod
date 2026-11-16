@@ -160,6 +160,7 @@ class SqliteStorage(
     data class LoadedData(
         val states: Map<UUID, PlayerTitleState>,
         val ownership: List<OwnershipRecord>,
+        val showOwnNametag: Map<UUID, Boolean> = emptyMap(),
     )
 
     /**
@@ -192,6 +193,7 @@ class SqliteStorage(
             val expectedTables = listOf(
                 "player_state" to EXPECTED_PLAYER_STATE_COLUMNS,
                 "ownership" to EXPECTED_OWNERSHIP_COLUMNS,
+                "player_preferences" to EXPECTED_PREFERENCE_COLUMNS,
             )
             // Verify every table that exists before creating anything, so a
             // layout mismatch refuses without leaving new tables behind.
@@ -207,6 +209,7 @@ class SqliteStorage(
             // bug had already stamped as version 1 need the same recovery).
             statement.executeUpdate(PLAYER_STATE_DDL)
             statement.executeUpdate(OWNERSHIP_DDL)
+            statement.executeUpdate(PREFERENCES_DDL)
             if (version == 0) {
                 statement.executeUpdate("PRAGMA user_version = $SCHEMA_VERSION")
             }
@@ -240,6 +243,18 @@ class SqliteStorage(
             PRIMARY KEY (uuid, titleId, source)
         )
     """.trimIndent()
+
+    private val PREFERENCES_DDL = """
+        CREATE TABLE IF NOT EXISTS player_preferences (
+            uuid TEXT PRIMARY KEY,
+            showOwnNametag INTEGER NOT NULL
+        )
+    """.trimIndent()
+
+    private val EXPECTED_PREFERENCE_COLUMNS = listOf(
+        ExpectedColumn("uuid", "TEXT", notNull = false, pkPosition = 1),
+        ExpectedColumn("showOwnNametag", "INTEGER", notNull = true, pkPosition = 0),
+    )
 
     private val EXPECTED_PLAYER_STATE_COLUMNS = listOf(
         ExpectedColumn("uuid", "TEXT", notNull = false, pkPosition = 1),
@@ -329,7 +344,14 @@ class SqliteStorage(
                 }
             }
         }
-        return LoadedData(states, ownership)
+        val preferences = LinkedHashMap<UUID, Boolean>()
+        connection.createStatement().use { statement ->
+            statement.executeQuery("SELECT uuid, showOwnNametag FROM player_preferences").use { resultSet ->
+                while (resultSet.next()) preferences[UUID.fromString(resultSet.getString("uuid"))] =
+                    resultSet.getInt("showOwnNametag") != 0
+            }
+        }
+        return LoadedData(states, ownership, preferences)
     }
 
     private fun decodeIds(json: String): List<TitleId> {
@@ -354,6 +376,27 @@ class SqliteStorage(
      * only when it still carries [expectedRevision] (or is new and the caller
      * expected 0).
      */
+    fun enqueueSavePreference(uuid: UUID, visible: Boolean, callback: (Exception?) -> Unit) {
+        if (!usable) {
+            mainExecutor.execute { callback(IllegalStateException(UNAVAILABLE_PREFIX + (unavailableReason ?: UNAVAILABLE_FALLBACK))) }
+            return
+        }
+        writeExecutor.execute {
+            val error = try {
+                connection.prepareStatement(
+                    "INSERT INTO player_preferences (uuid, showOwnNametag) VALUES (?, ?) " +
+                        "ON CONFLICT(uuid) DO UPDATE SET showOwnNametag = excluded.showOwnNametag",
+                ).use { statement ->
+                    statement.setString(1, uuid.toString())
+                    statement.setInt(2, if (visible) 1 else 0)
+                    statement.executeUpdate()
+                }
+                null
+            } catch (e: Exception) { e }
+            mainExecutor.execute { callback(error) }
+        }
+    }
+
     fun enqueueSaveState(state: PlayerTitleState, expectedRevision: Long, callback: (StateSaveResult) -> Unit) {
         if (!usable) {
             val reason = UNAVAILABLE_PREFIX + (unavailableReason ?: UNAVAILABLE_FALLBACK)
