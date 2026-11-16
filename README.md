@@ -45,7 +45,7 @@ Nothing needs to be installed on the client.
 
 1. Install Fabric Loader, Fabric API and Fabric Language Kotlin on the server.
 2. Put `FancyCrests-<version>.jar` into the `mods/` directory.
-3. Start the server once and wait for the default configuration file `config/fancycrests.json` to be generated.
+3. Start the server once and wait for the default configuration file `config/FancyCrests/config.yaml` to be generated.
 4. Edit titles, templates and rules as needed, then run `/fancycrests reload` to apply them.
 
 ## Commands
@@ -105,7 +105,9 @@ The nickname bypass node skips reserved-name checks and checks for conflicts wit
 
 ## Configuration
 
-`config/fancycrests.json` is strictly validated when loaded, and any problems are reported with their exact JSON paths. Unknown or misspelled fields are always treated as **errors** and never silently ignored. In the past, typos such as `permisson` and `titels`, or a segment missing its `type`, could silently change configuration behavior and make problems difficult to diagnose. If a **reload** fails, the server keeps using the last active configuration. If loading fails during **startup**, it falls back to the most recent valid backup (`fancycrests.json.last-good`), which is rewritten after every successful full validation. If neither the main file nor the backup is usable, the server enters **protection mode**: title state changes are refused, and saved equipment is not forcibly unequipped against an unknown catalog. This prevents a bad configuration from clearing players' existing choices. Fix the configuration file, then restart the server or run `/fancycrests reload` to leave protection mode.
+`config/FancyCrests/config.yaml` is strictly validated when loaded, and problems are reported with their exact configuration paths. Unknown or misspelled fields are errors. If a reload fails, the previous configuration remains active. If startup loading fails, the most recent valid copy (`config.yaml.last-good`) is used; if neither file is usable, protection mode prevents saved title choices from being changed. Fix the file and restart or use `/fancycrests reload`.
+
+On the first start after upgrading, the previous JSON configuration, its last-good copy and the SQLite database are moved into `config/FancyCrests`, with JSON converted to YAML. Existing files at both the old and new locations prevent migration so neither copy is overwritten. Stop the server and resolve the conflict before starting again.
 
 | Configuration section | Purpose |
 | --- | --- |
@@ -118,11 +120,11 @@ The nickname bypass node skips reserved-name checks and checks for conflicts wit
 | `render` | `distanceBlocks` (8–128) and offsets for the first and second lines |
 | `titles` | `id`, `slot` (`prefix`/`suffix`), `displayName`, `text` (`&` color codes), `permission`, `category`, `iconItem`, `sortOrder` (0–10000) |
 
-You can add a `presets` array to the `nickname` section to list selectable nicknames in the order they should appear in the menu, for example: `"presets": ["&aExplorer", "&bBuilder"]`. Players with `fancycrests.menu` can choose a preset or reset their nickname from the menu even without the custom nickname permission. Presets still undergo nickname length, pattern, reserved-name and player-name checks. Setting `allowSet` to `false` disables both preset selection and custom input, but still allows players to reset their nickname.
+You can add a `presets` list to the `nickname` section to list selectable nicknames in the order they should appear in the menu, for example: `presets: ["&aExplorer", "&bBuilder"]`. Players with `fancycrests.menu` can choose a preset or reset their nickname from the menu even without the custom nickname permission. Presets still undergo nickname length, pattern, reserved-name and player-name checks. Setting `allowSet` to `false` disables both preset selection and custom input, but still allows players to reset their nickname.
 
 Titles use a name tag icon in the menu by default. To change it, set `iconItem` to a registered item ID, such as `minecraft:diamond`. Equipped titles have an enchantment glint in the menu, while unequipped ones do not, making them easy to distinguish.
 
-All numeric fields are parsed exactly from the original JSON text: `3.0` is accepted as the integer `3`, while `3.9`, `1e5` and values outside the allowed range produce an error with the exact path. If a `dimension` condition has no namespace, the vanilla namespace is added automatically (for example, `overworld` → `minecraft:overworld`). Nicknames also cannot begin or end with whitespace.
+Numeric fields are checked strictly: `3.0` is accepted as the integer `3`, while `3.9`, `1e5` and values outside the allowed range produce an error with the exact path. If a `dimension` condition has no namespace, the vanilla namespace is added automatically (for example, `overworld` → `minecraft:overworld`). Nicknames also cannot begin or end with whitespace.
 
 Titles with a `permission` can only be equipped by players who own them locally or are allowed to use the corresponding node by the active permission backend.
 

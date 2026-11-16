@@ -50,7 +50,7 @@ class StorageSchemaException(message: String) : Exception(message)
 /**
  * SQLite persistence for player state and ownership.
  *
- * - Database file: `config/fancycrests-data.db` (or :memory: for tests).
+ * - Database file: `config/FancyCrests/fancycrests-data.db` (or :memory: for tests).
  * - `PRAGMA journal_mode=WAL`.
  * - Single background write thread; every statement is its own transaction.
  * - player_state saves use optimistic concurrency: the UPDATE only applies

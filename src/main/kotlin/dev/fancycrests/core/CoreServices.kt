@@ -5,6 +5,7 @@ import dev.fancycrests.api.PlayerTitleState
 import dev.fancycrests.core.catalog.CatalogReplaceResult
 import dev.fancycrests.core.catalog.CatalogService
 import dev.fancycrests.core.config.ConfigLoadResult
+import dev.fancycrests.core.config.ConfigMigration
 import dev.fancycrests.core.config.ConfigService
 import dev.fancycrests.core.config.FancyCrestsConfig
 import dev.fancycrests.core.event.TitleEventBus
@@ -135,14 +136,15 @@ class CoreServices(
         val mainExecutor = java.util.concurrent.Executor { runnable -> adapter.execute(runnable) }
 
         // ---- configuration -------------------------------------------
-        configService = ConfigService(configDir.resolve("fancycrests.json"), mainExecutor)
+        val modDir = ConfigMigration.migrate(configDir)
+        configService = ConfigService(modDir.resolve("config.yaml"), mainExecutor)
         when (val result = configService.loadOrCreate()) {
             is ConfigLoadResult.Success ->
                 logger.info("Loaded configuration with ${result.config.titles.size} titles")
             is ConfigLoadResult.Failure -> {
                 logger.error(
                     "Configuration invalid ({}); running with safe defaults. Errors: {}",
-                    configDir.resolve("fancycrests.json"),
+                    modDir.resolve("config.yaml"),
                     result.errors.joinToString("; "),
                 )
             }
@@ -181,7 +183,7 @@ class CoreServices(
         )
 
         // ---- storage --------------------------------------------------
-        storage = SqliteStorage(configDir.resolve("fancycrests-data.db"), mainExecutor)
+        storage = SqliteStorage(modDir.resolve("fancycrests-data.db"), mainExecutor)
         val loaded = try {
             val data = storage.start()
             storageAvailable = true

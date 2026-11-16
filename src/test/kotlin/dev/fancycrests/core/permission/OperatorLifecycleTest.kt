@@ -64,7 +64,7 @@ class OperatorLifecycleTest {
         assertEquals(PermissionVerdict.ALLOW, core.permissionManager.check(uuid, "example.rule.staff"))
         assertEquals(PermissionVerdict.UNDEFINED, core.permissionManager.check(uuid, "example.unrelated"))
 
-        Files.writeString(directory.resolve("fancycrests.json"), config("example.title.new"))
+        Files.writeString(directory.resolve("FancyCrests/config.yaml"), config("example.title.new"))
         val result = await<ConfigLoadResult> { core.reloadAsync(it) }
         assertTrue(result is ConfigLoadResult.Success)
         assertEquals(PermissionVerdict.UNDEFINED, core.permissionManager.check(uuid, "example.title.vip"))

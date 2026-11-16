@@ -1,11 +1,7 @@
 package dev.fancycrests.core.config
 
-import com.google.gson.Gson
-import com.google.gson.GsonBuilder
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
-import com.google.gson.JsonParseException
-import com.google.gson.JsonParser
 import com.google.gson.JsonPrimitive
 import dev.fancycrests.api.RenderDistance
 import dev.fancycrests.api.RenderSettings
@@ -280,7 +276,7 @@ enum class LoadState {
 }
 
 /**
- * Loads, validates and hot-swaps `fancycrests.json`.
+ * Loads, validates and hot-swaps the YAML configuration.
  *
  * Pipeline (plan chapter 2 "配置重载"): background read + parse, main-thread
  * semantic validation, build immutable config, atomic replacement, then notify
@@ -292,7 +288,6 @@ class ConfigService(
     private val mainExecutor: Executor,
 ) {
     private val logger: Logger = LoggerFactory.getLogger("FancyCrests/Config")
-    private val gson: Gson = GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create()
     private val ioExecutor: ExecutorService =
         Executors.newSingleThreadExecutor { thread -> Thread(thread, "fancycrests-config").apply { isDaemon = true } }
 
@@ -461,18 +456,14 @@ class ConfigService(
             )
         }
         val root = try {
-            JsonParser.parseString(Files.readString(file, StandardCharsets.UTF_8))
-        } catch (e: JsonParseException) {
-            return ConfigLoadResult.Failure(
-                listOf(ConfigError("$", "invalid JSON: ${e.message ?: e.javaClass.simpleName}")),
-            )
+            ConfigYaml.parse(Files.readString(file, StandardCharsets.UTF_8))
         } catch (e: Exception) {
             return ConfigLoadResult.Failure(
-                listOf(ConfigError(file.toString(), "cannot read file: ${e.message}")),
+                listOf(ConfigError(file.toString(), "cannot read or parse YAML: ${e.message}")),
             )
         }
         if (!root.isJsonObject) {
-            return ConfigLoadResult.Failure(listOf(ConfigError("$", "root must be a JSON object")))
+            return ConfigLoadResult.Failure(listOf(ConfigError("$", "root must be a mapping")))
         }
 
         val config = try {
@@ -510,7 +501,7 @@ class ConfigService(
             val parent = configFile.toAbsolutePath().parent
             if (parent != null) Files.createDirectories(parent)
             val temp = configFile.resolveSibling(configFile.fileName.toString() + ".tmp")
-            Files.writeString(temp, gson.toJson(toJson(config)), StandardCharsets.UTF_8)
+            Files.writeString(temp, ConfigYaml.dump(toJson(config)), StandardCharsets.UTF_8)
             try {
                 Files.move(temp, configFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
             } catch (e: Exception) {

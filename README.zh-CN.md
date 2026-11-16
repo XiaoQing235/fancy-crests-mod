@@ -45,7 +45,7 @@
 
 1. 在服务端安装 Fabric Loader、Fabric API 和 Fabric Language Kotlin。
 2. 将 `FancyCrests-<version>.jar` 放入 `mods/` 目录。
-3. 首次启动服务器，等待生成默认配置文件 `config/fancycrests.json`。
+3. 首次启动服务器，等待生成默认配置文件 `config/FancyCrests/config.yaml`。
 4. 按需编辑称号、模板和规则，然后执行 `/fancycrests reload` 使其生效。
 
 ## 命令
@@ -105,7 +105,9 @@
 
 ## 配置
 
-加载 `config/fancycrests.json` 时会执行严格校验，一旦发现问题就会报告精确的 JSON 路径。所有未知字段或拼写错误都会被视为**错误**，绝不静默忽略（过去像 `permisson`、`titels` 这类拼写失误，或者片段中漏写 `type`，曾导致配置行为悄然改变而不易排查）。如果**重载**失败，服务端会继续沿用上一次生效的配置；如果**启动**时加载失败，则会回退到最近一次有效的备份副本（`fancycrests.json.last-good`，每次完整校验通过后都会自动重写）。万一主文件和备份副本都不可用，服务器将进入**保护模式**：此时会拒绝变更称号状态，也不会根据未知目录强行卸下已保存的装备，以免错误配置清掉玩家现有的选择。修复配置文件后重启服务器，或执行 `/fancycrests reload` 即可退出保护模式。
+加载 `config/FancyCrests/config.yaml` 时会严格校验并报告问题的具体配置路径，未知或拼写错误的字段均视为错误。重载失败时保留当前配置；启动加载失败时使用最近一次有效副本 `config.yaml.last-good`；两者均不可用时进入保护模式，避免更改玩家已保存的称号。修复配置后重启或执行 `/fancycrests reload`。
+
+升级后首次启动时，原 JSON 配置、最近有效副本和 SQLite 数据库会迁入 `config/FancyCrests`，JSON 会转换为 YAML。若新旧位置同时存在同名数据，迁移会停止并保留两边内容；请停止服务器并处理冲突后再启动。
 
 | 配置区段            | 用途                                                         |
 | ------------------- | ------------------------------------------------------------ |
@@ -118,11 +120,11 @@
 | `render`            | `distanceBlocks`（8–128）以及第一行和第二行的偏移量          |
 | `titles`            | `id`、`slot`（`prefix`/`suffix`）、`displayName`、`text`（`&` 颜色代码）、`permission`、`category`、`iconItem`、`sortOrder`（0–10000） |
 
-你可以在 `nickname` 区段中添加 `presets` 数组，按菜单中希望展示的顺序列出可选昵称，例如：`"presets": ["&aExplorer", "&bBuilder"]`。拥有 `fancycrests.menu` 权限的玩家即使没有自定义昵称权限，也能在菜单里直接选择预设或重置昵称。不过预设依然需要通过昵称长度、格式、保留名称和玩家重名检查；如果将 `allowSet` 设为 `false`，则会同时禁用预设选择和自定义输入，但依然允许玩家重置昵称。
+你可以在 `nickname` 区段中添加 `presets` 列表，按菜单中希望展示的顺序列出可选昵称，例如：`presets: ["&aExplorer", "&bBuilder"]`。拥有 `fancycrests.menu` 权限的玩家即使没有自定义昵称权限，也能在菜单里直接选择预设或重置昵称。不过预设依然需要通过昵称长度、格式、保留名称和玩家重名检查；如果将 `allowSet` 设为 `false`，则会同时禁用预设选择和自定义输入，但依然允许玩家重置昵称。
 
 称号在菜单中默认使用命名牌图标。如果想更换图标，只需把 `iconItem` 设为已注册的物品 ID（例如 `minecraft:diamond`）。已装备的称号在菜单中会带有附魔光效，未装备的则没有，方便玩家一眼区分。
 
-所有数值字段都会根据 JSON 原文进行精确解析：`3.0` 会作为整数 `3` 正常接受，而 `3.9`、`1e5` 以及超出字段允许范围的值都会直接报错，并指出精确路径。`dimension` 条件若未指定命名空间，会自动补全原版命名空间（如 `overworld` → `minecraft:overworld`）；此外，昵称的首尾不能包含空白字符。
+所有数值字段都会进行严格校验：`3.0` 会作为整数 `3` 正常接受，而 `3.9`、`1e5` 以及超出字段允许范围的值都会直接报错，并指出精确路径。`dimension` 条件若未指定命名空间，会自动补全原版命名空间（如 `overworld` → `minecraft:overworld`）；此外，昵称的首尾不能包含空白字符。
 
 带有 `permission` 的称号，仅能由在本地拥有该称号，或被当前权限后端允许使用对应节点的玩家装备。
 

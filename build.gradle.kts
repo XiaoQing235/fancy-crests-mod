@@ -57,6 +57,9 @@ dependencies {
 	// SQLite storage; bundled so servers need no extra install.
 	implementation("org.xerial:sqlite-jdbc:3.54.1.0")
 	include("org.xerial:sqlite-jdbc:3.54.1.0")
+	// YAML configuration, bundled for dedicated servers.
+	implementation("org.yaml:snakeyaml:2.4")
+	include("org.yaml:snakeyaml:2.4")
 
 	testImplementation(kotlin("test"))
 
