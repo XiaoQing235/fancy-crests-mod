@@ -2,6 +2,7 @@ package dev.fancycrests.adapter.placeholderapi
 
 import eu.pb4.placeholders.api.Placeholders
 import eu.pb4.placeholders.api.ServerPlaceholderContext
+import dev.fancycrests.core.config.LegacyTextParser
 import net.minecraft.network.chat.Component
 import net.minecraft.resources.Identifier
 import net.minecraft.server.level.ServerPlayer
@@ -10,17 +11,24 @@ import net.minecraft.server.level.ServerPlayer
 internal object PlaceholderApiImport {
     fun resolve(player: ServerPlayer, token: String): Component? {
         val pieces = token.split(' ', limit = 2)
-        if (':' !in pieces[0]) return null
-        val identifier = Identifier.tryParse(pieces[0]) ?: return null
-        val argument = pieces.getOrNull(1)
         val context = ServerPlaceholderContext.of(player)
+        val identifier = if (':' in pieces[0]) Identifier.tryParse(pieces[0]) else null
         val result = when {
-            Placeholders.getServerPlaceholder(identifier) != null ->
-                Placeholders.parseServerPlaceholder(identifier, argument, context)
-            Placeholders.getCommonPlaceholder(identifier) != null ->
-                Placeholders.parseCommonPlaceholder(identifier, argument, context)
-            else -> return null
+            identifier != null && Placeholders.getServerPlaceholder(identifier) != null ->
+                Placeholders.parseServerPlaceholder(identifier, pieces.getOrNull(1), context)
+            identifier != null && Placeholders.getCommonPlaceholder(identifier) != null ->
+                Placeholders.parseCommonPlaceholder(identifier, pieces.getOrNull(1), context)
+            else -> null
         }
-        return if (result.isValid) result.component() else null
+        if (result != null && result.isValid) return result.component()
+
+        // TAB exposes its own variable registry as this Fabric placeholder.
+        // It returns the original token when its providers cannot resolve it.
+        val tab = Identifier.tryParse("tab:placeholder") ?: return null
+        if (Placeholders.getServerPlaceholder(tab) == null) return null
+        val tabResult = Placeholders.parseServerPlaceholder(tab, token, context)
+        if (!tabResult.isValid) return null
+        val text = tabResult.component().string
+        return if (text == "%$token%") null else LegacyTextParser.parse(text)
     }
 }

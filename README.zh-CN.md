@@ -183,7 +183,7 @@ conditions:
 ## 集成
 
 - **LuckPerms**：检测到 Fabric 版 LuckPerms 时，模组会在内置后端之后注册 `luckperms` 后端。明确的允许或拒绝规则会优先生效，未定义的节点则会回退到上文规定的默认值。当权限发生变更时，系统会在主线程重新进行检查，确保被撤销资格的称号能够及时移除。
-- **Text Placeholder API**：安装后可读取其他提供者注册的占位符，例如 `%player:displayname%`、`%player:statistic_raw used netherite_hoe%` 或 TAB 的 Fabric 导出。需要实际安装兼容当前版本的提供者。仅支持 Bukkit 的 Essentials/PlaceholderAPI 扩展不能在 Fabric 服务端直接使用，除非有合适的桥接模组提供。开启 `channels.placeholdersExport` 后也可向其他模组导出上述四个 Fancy Crests 占位符。
+- **Text Placeholder API**：安装后可读取其他提供者注册的占位符，例如 `%player:displayname%`、`%player:statistic_raw used netherite_hoe%` 或 TAB 的 Fabric 导出。启用 TAB 的 Fabric 扩展后，未解析的占位符还会通过 TAB 的注册表查询。需要实际安装兼容当前版本的提供者。仅支持 Bukkit 的 Essentials/PlaceholderAPI 扩展不能在 Fabric 服务端直接使用，除非有合适的桥接模组提供。开启 `channels.placeholdersExport` 后也可向其他模组导出上述四个 Fancy Crests 占位符。
 - **LuckPerms 占位符**：安装 Fabric LuckPerms 后可直接使用 `%luckperms:prefix%`、`%luckperms:suffix%`、`%luckperms:primary_group_name%` 和 `%luckperms:meta key%`；其他占位符需要相应兼容提供者。
 
 ## 许可证
