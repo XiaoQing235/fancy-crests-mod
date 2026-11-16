@@ -134,7 +134,7 @@
 
 ## 占位符
 
-第二行模板和 Text Placeholder API 导出共用同一占位符注册表：
+模板支持 `%player%`、下列占位符、命名条件，以及其他模组通过 Fabric Text Placeholder API 注册的占位符：
 
 | 占位符                    | 值                                           |
 | ------------------------- | -------------------------------------------- |
@@ -143,10 +143,29 @@
 | `%fancycrests:nickname%`  | 昵称；未设置时为当前档案名称                 |
 | `%fancycrests:belowname%` | 已解析的管理员第二行文本；没有匹配规则时为空 |
 
+可以在 YAML 中定义可复用的条件占位符：
+
+```yaml
+conditions:
+  nickname:
+    conditions:
+      - "%player%=%player:displayname%"
+    true: "%player%"
+    false: "~%player:displayname%"
+  example:
+    conditions: ["%player%=TestPlayer", "permission:example.staff"]
+    type: AND
+    true: "&bStaff %condition:nickname%"
+    false: ""
+```
+
+模板中使用 `%condition:nickname%`。`type` 默认 `AND`，也可设为 `OR`；比较支持 `=`、`==`、`!=`、`<`、`<=`、`>`、`>=`，大小比较要求数字。条件引用不存在或存在循环时会报配置错误；外部占位符不可用时保留原文，比较不会误判为成功。
+
 ## 集成
 
 - **LuckPerms**：检测到 Fabric 版 LuckPerms 时，模组会在内置后端之后注册 `luckperms` 后端。明确的允许或拒绝规则会优先生效，未定义的节点则会回退到上文规定的默认值。当权限发生变更时，系统会在主线程重新进行检查，确保被撤销资格的称号能够及时移除。
-- **Text Placeholder API**：检测到该模组时，会自动导出上述四个占位符，供聊天、TAB 列表或其他兼容插件/模组调用。即便没有安装它，Fancy Crests 的各项功能依然可以正常运行。
+- **Text Placeholder API**：安装后可读取其他提供者注册的占位符，例如 `%player:displayname%`、`%player:statistic_raw used netherite_hoe%` 或 TAB 的 Fabric 导出。需要实际安装兼容当前版本的提供者。仅支持 Bukkit 的 Essentials/PlaceholderAPI 扩展不能在 Fabric 服务端直接使用，除非有合适的桥接模组提供。开启 `channels.placeholdersExport` 后也可向其他模组导出上述四个 Fancy Crests 占位符。
+- **LuckPerms 占位符**：安装 Fabric LuckPerms 后可直接使用 `%luckperms:prefix%`、`%luckperms:suffix%`、`%luckperms:primary_group_name%` 和 `%luckperms:meta key%`；其他占位符需要相应兼容提供者。
 
 ## 许可证
 

@@ -4,6 +4,7 @@ import dev.fancycrests.api.PlaceholderKey
 import dev.fancycrests.api.PlaceholderRequest
 import dev.fancycrests.api.PlaceholderService
 import dev.fancycrests.core.config.LegacyTextParser
+import dev.fancycrests.core.config.NamedConditionConfig
 import java.util.UUID
 import net.minecraft.network.chat.Component
 
@@ -12,12 +13,11 @@ import net.minecraft.network.chat.Component
  * placeholder tokens. Pure string logic — no Minecraft types — so it is unit
  * testable without a server.
  *
- * Only `%fancycrests:key%` tokens are recognized; anything else (including
- * other namespaces such as `%other:x%`) stays literal static text. Player
- * input therefore can never become an expression, script or command.
+ * Placeholder text is only resolved through registered providers; it is never
+ * interpreted as a command or script.
  */
 object TemplateTokenizer {
-    private val TOKEN = Regex("%fancycrests:([A-Za-z0-9_-]+)%")
+    private val TOKEN = Regex("%([A-Za-z0-9_][A-Za-z0-9_:./ -]{0,255})%")
 
     /** One parsed piece of a template. */
     sealed interface Segment {
@@ -26,6 +26,9 @@ object TemplateTokenizer {
 
         /** A `%fancycrests:key%` reference. */
         data class Placeholder(val key: String) : Segment
+
+        /** A named condition, built-in player value, or external provider token. */
+        data class External(val token: String) : Segment
     }
 
     fun tokenize(template: String): List<Segment> {
@@ -35,7 +38,11 @@ object TemplateTokenizer {
         for (match in TOKEN.findAll(template)) {
             val literal = template.substring(index, match.range.first)
             if (literal.isNotEmpty()) segments += Segment.Static(literal)
-            segments += Segment.Placeholder(match.groupValues[1])
+            val token = match.groupValues[1]
+            segments += if (token.startsWith("fancycrests:") &&
+                Regex("[A-Za-z0-9_-]+").matches(token.removePrefix("fancycrests:"))) {
+                Segment.Placeholder(token.removePrefix("fancycrests:"))
+            } else Segment.External(token)
             index = match.range.last + 1
         }
         if (index < template.length) segments += Segment.Static(template.substring(index))
@@ -68,11 +75,17 @@ object TemplateTokenizer {
  * marker, so renders from async placeholder adapters are safe as long as the
  * registered resolvers read only published immutable state (they do).
  */
-class TemplateEngine(private val placeholders: PlaceholderService) {
+class TemplateEngine(
+    private val placeholders: PlaceholderService,
+    private val conditions: () -> Map<String, NamedConditionConfig> = { emptyMap() },
+    private val playerName: (UUID) -> String? = { null },
+    private val external: (String, UUID) -> Component? = { _, _ -> null },
+    private val hasPermission: (UUID, String) -> Boolean = { _, _ -> false },
+) {
 
     companion object {
         const val NAMESPACE_PREFIX = "fancycrests"
-        const val MAX_RENDER_DEPTH = 6
+        const val MAX_RENDER_DEPTH = 16
         const val MAX_TOTAL_PLAIN_LENGTH = 2048
         const val MAX_RESOLUTION_STEPS = 10_000
     }
@@ -93,6 +106,7 @@ class TemplateEngine(private val placeholders: PlaceholderService) {
      * recursive placeholder chains.
      */
     private val renderDepth = ThreadLocal.withInitial { 0 }
+    private val resolvingConditions = ThreadLocal.withInitial { mutableSetOf<String>() }
 
     /** True while [target]'s second line is being rendered on this thread. */
     fun isSecondLineResolving(target: UUID): Boolean = resolvingSecondLine.get() == target
@@ -181,6 +195,30 @@ class TemplateEngine(private val placeholders: PlaceholderService) {
                     root.append(resolved.copy())
                     appended++
                 }
+                is TemplateTokenizer.Segment.External -> {
+                    steps++
+                    if (steps > MAX_RESOLUTION_STEPS) { truncated = true; break }
+                    val token = segment.token
+                    val conditionName = token.removePrefix("condition:")
+                    val nested = if (token.startsWith("condition:")) {
+                        renderCondition(conditionName, request)
+                    } else null
+                    val resolved = when {
+                        token.startsWith("condition:") -> nested?.component
+                        token == "player" -> playerName(request.target)?.let { Component.literal(it) }
+                        else -> try { external(token, request.target) } catch (_: Exception) { null }
+                    }
+                    if (nested != null) {
+                        missing += nested.missingKeys
+                        truncated = truncated || nested.truncated
+                    }
+                    val output = resolved ?: Component.literal("%$token%")
+                    if (resolved == null) missing += PlaceholderKey(token)
+                    totalLength += output.string.length
+                    if (totalLength > MAX_TOTAL_PLAIN_LENGTH) { truncated = true; break }
+                    root.append(output.copy())
+                    appended++
+                }
             }
         }
 
@@ -192,5 +230,57 @@ class TemplateEngine(private val placeholders: PlaceholderService) {
             root
         }
         return Result(component, missing, truncated)
+    }
+
+    private fun renderCondition(name: String, request: PlaceholderRequest): Result? {
+        val condition = conditions()[name] ?: return null
+        val stack = resolvingConditions.get()
+        if (!stack.add(name)) return Result(Component.empty(), listOf(PlaceholderKey("condition:$name")), true)
+        try {
+            val matches = condition.conditions.map { expression ->
+                val permission = ConditionExpressions.permission(expression)
+                if (permission != null) {
+                    hasPermission(request.target, permission)
+                } else {
+                    val comparison = ConditionExpressions.parse(expression) ?: return@map false
+                    val left = render(comparison.left, request)
+                    val right = render(comparison.right, request)
+                    if (left.truncated || right.truncated || left.missingKeys.isNotEmpty() || right.missingKeys.isNotEmpty()) {
+                        false
+                    } else ConditionExpressions.compare(left.component.string, comparison.operator, right.component.string)
+                }
+            }
+            val matched = if (condition.any) matches.any { it } else matches.all { it }
+            return render(if (matched) condition.whenTrue else condition.whenFalse, request)
+        } finally {
+            stack.remove(name)
+        }
+    }
+}
+
+/** The deliberately small, non-executable subset of TAB-style condition expressions. */
+object ConditionExpressions {
+    data class Comparison(val left: String, val operator: String, val right: String)
+    private val comparison = Regex("^\\s*(.*?)\\s*(==|!=|>=|<=|=|>|<)\\s*(.*?)\\s*$")
+    fun permission(expression: String): String? = expression.trim().removePrefix("permission:")
+        .takeIf { expression.trim().startsWith("permission:") && it.isNotBlank() }
+    fun parse(expression: String): Comparison? = comparison.matchEntire(expression)?.let {
+        Comparison(it.groupValues[1], it.groupValues[2], it.groupValues[3])
+    }
+    fun isValid(expression: String): Boolean = permission(expression) != null || parse(expression) != null
+    fun compare(left: String, op: String, right: String): Boolean = when (op) {
+        "=", "==" -> left == right
+        "!=" -> left != right
+        else -> {
+            val l = left.toBigDecimalOrNull()
+            val r = right.toBigDecimalOrNull()
+            if (l == null || r == null) false else when (op) {
+                ">" -> l > r
+                ">=" -> l >= r
+                "<" -> l < r
+                "<=" -> l <= r
+                else -> false
+            }
+        }
     }
 }

@@ -101,6 +101,14 @@ data class TemplateSegment(
 /** Match condition of a second-line rule. Present fields must all match (AND). */
 data class SecondLineCondition(val dimension: String?, val permission: String?)
 
+/** A named condition used as %condition:name% in a text template. */
+data class NamedConditionConfig(
+    val conditions: List<String>,
+    val any: Boolean,
+    val whenTrue: String,
+    val whenFalse: String,
+)
+
 /**
  * Admin-configured second-line rule. The template mixes static text (& codes)
  * with built-in `%fancycrests:key%` placeholders; [refreshTicks] controls how
@@ -173,6 +181,7 @@ data class FancyCrestsConfig(
     val secondLineRules: List<SecondLineRuleConfig>,
     val render: RenderConfig,
     val titles: List<TitleConfig>,
+    val conditions: Map<String, NamedConditionConfig> = emptyMap(),
 ) {
     /** Builds the immutable catalog entries (text parsed to Components). */
     fun toTitleDefinitions(): Map<TitleId, TitleDefinition> {
@@ -627,6 +636,45 @@ class ConfigService(
             }
         }
 
+        val conditionReferences = Regex("%condition:([A-Za-z0-9_-]+)%")
+        for ((name, condition) in root.conditions) {
+            val path = "conditions.$name"
+            if (!Regex("[A-Za-z0-9_-]+").matches(name)) {
+                errors += ConfigError(path, "name must contain only letters, digits, _ or -")
+            }
+            if (condition.conditions.isEmpty()) errors += ConfigError("$path.conditions", "must not be empty")
+            for ((index, expression) in condition.conditions.withIndex()) {
+                if (!dev.fancycrests.core.refresh.ConditionExpressions.isValid(expression)) {
+                    errors += ConfigError("$path.conditions[$index]", "expected a comparison or permission:<node>")
+                }
+            }
+            for (text in condition.conditions + listOf(condition.whenTrue, condition.whenFalse)) {
+                for (match in conditionReferences.findAll(text)) {
+                    if (match.groupValues[1] !in root.conditions) {
+                        errors += ConfigError(path, "unknown condition '${match.groupValues[1]}'")
+                    }
+                }
+            }
+        }
+        val visitedConditions = HashSet<String>()
+        fun visitCondition(name: String, path: Set<String>) {
+            if (name in path) {
+                errors += ConfigError("conditions.$name", "condition references form a cycle")
+                return
+            }
+            if (path.size >= 16) {
+                errors += ConfigError("conditions.$name", "condition nesting must not exceed 16")
+                return
+            }
+            if (name in visitedConditions) return
+            val condition = root.conditions[name] ?: return
+            for (text in condition.conditions + listOf(condition.whenTrue, condition.whenFalse)) {
+                for (match in conditionReferences.findAll(text)) visitCondition(match.groupValues[1], path + name)
+            }
+            visitedConditions += name
+        }
+        for (name in root.conditions.keys) visitCondition(name, emptySet())
+
         val render = root.render
         if (!render.distanceBlocks.isFinite() || render.distanceBlocks !in NumericBounds.DISTANCE_BLOCKS) {
             errors += ConfigError(
@@ -703,7 +751,7 @@ class ConfigService(
     private object KnownKeys {
         val ROOT = setOf(
             "channels", "equipment", "nickname", "permissions",
-            "firstLineTemplate", "secondLineRules", "render", "titles",
+            "firstLineTemplate", "secondLineRules", "render", "titles", "conditions",
         )
         val CHANNELS = setOf(
             "headRender", "chat", "tabList", "placeholdersExport",
@@ -717,6 +765,7 @@ class ConfigService(
         val CHANNEL_TEMPLATE_SEGMENT = setOf("type", "separator", "separatorStyle", "segmentSeparator")
         val RULE = setOf("id", "priority", "condition", "template", "refreshTicks")
         val CONDITION = setOf("dimension", "permission")
+        val NAMED_CONDITION = setOf("conditions", "type", "true", "false")
         val RENDER = setOf("distanceBlocks", "firstLineOffset", "secondLineOffset")
         val OFFSET = setOf("x", "y", "z")
         val TITLE = setOf(
@@ -890,6 +939,25 @@ class ConfigService(
             )
         }
 
+        val namedConditions = LinkedHashMap<String, NamedConditionConfig>()
+        for ((name, value) in root.optObject("conditions", "conditions", errors).entrySet()) {
+            val path = "conditions.$name"
+            if (!value.isJsonObject) {
+                errors += ConfigError(path, "must be a mapping")
+                continue
+            }
+            val obj = value.asJsonObject
+            obj.rejectUnknownKeys(path, KnownKeys.NAMED_CONDITION, errors)
+            val type = obj.string("type", "AND", "$path.type", errors)?.uppercase()
+            if (type != "AND" && type != "OR") errors += ConfigError("$path.type", "must be AND or OR")
+            namedConditions[name] = NamedConditionConfig(
+                conditions = obj.stringList("conditions", "$path.conditions", errors),
+                any = type == "OR",
+                whenTrue = obj.requiredString("true", "$path.true", errors) ?: "",
+                whenFalse = obj.requiredString("false", "$path.false", errors) ?: "",
+            )
+        }
+
         val renderObj = root.optObject("render", "render", errors)
         renderObj.rejectUnknownKeys("render", KnownKeys.RENDER, errors)
         val distanceBlocks = renderObj.double("distanceBlocks", 48.0, "render.distanceBlocks", errors)
@@ -951,7 +1019,7 @@ class ConfigService(
         if (errors.isNotEmpty()) {
             throw ConfigParseException(errors)
         }
-        return FancyCrestsConfig(channels, equipment, nickname, PermissionsConfig(nodes), template, rules, render, titles)
+        return FancyCrestsConfig(channels, equipment, nickname, PermissionsConfig(nodes), template, rules, render, titles, namedConditions)
     }
 
     private fun JsonObject.optObject(member: String, path: String, errors: MutableList<ConfigError>): JsonObject {
@@ -1172,6 +1240,7 @@ class ConfigService(
         root.add("firstLineTemplate", template)
 
         root.add("secondLineRules", JsonArray())
+        root.add("conditions", JsonObject())
 
         root.add(
             "render",

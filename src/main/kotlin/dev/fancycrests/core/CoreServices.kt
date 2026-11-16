@@ -157,13 +157,22 @@ class CoreServices(
         permissionManager = PermissionManager(adapter, listOf(builtInBackend)) { node ->
             val config = configService.current
             config.titles.any { it.permission == node } ||
-                config.secondLineRules.any { it.condition?.permission == node }
+                config.secondLineRules.any { it.condition?.permission == node } ||
+                config.conditions.values.any { condition ->
+                    condition.conditions.any { dev.fancycrests.core.refresh.ConditionExpressions.permission(it) == node }
+                }
         }
 
         // ---- events & resolution -------------------------------------
         eventBus = TitleEventBus(mainExecutor)
         placeholderService = dev.fancycrests.core.refresh.PlaceholderServiceImpl()
-        templateEngine = dev.fancycrests.core.refresh.TemplateEngine(placeholderService)
+        templateEngine = dev.fancycrests.core.refresh.TemplateEngine(
+            placeholders = placeholderService,
+            conditions = { configService.current.conditions },
+            playerName = adapter::profileName,
+            external = adapter::externalPlaceholder,
+            hasPermission = { uuid, node -> permissionManager.check(uuid, node) == dev.fancycrests.api.PermissionVerdict.ALLOW },
+        )
         snapshotResolver = SnapshotResolver(catalogService, permissionManager, { configService.current }, templateEngine)
         snapshotPublisher = SnapshotPublisher(
             snapshotResolver,

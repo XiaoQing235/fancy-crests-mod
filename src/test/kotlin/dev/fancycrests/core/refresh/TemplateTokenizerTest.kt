@@ -3,7 +3,6 @@ package dev.fancycrests.core.refresh
 import dev.fancycrests.core.refresh.TemplateTokenizer.Segment
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /** Pure string-level checks of the template tokenizer (no Minecraft types). */
@@ -39,14 +38,12 @@ class TemplateTokenizerTest {
     }
 
     @Test
-    fun `foreign namespace and malformed tokens stay literal`() {
-        // Player or admin text from other namespaces must never become an
-        // expression — only fancycrests keys resolve.
+    fun `foreign namespace is recognized while malformed tokens stay literal`() {
         assertEquals(
-            listOf(Segment.Static("%other:player% %fancycrests:")),
+            listOf(Segment.External("other:player"), Segment.Static(" %fancycrests:")),
             TemplateTokenizer.tokenize("%other:player% %fancycrests:"),
         )
-        assertFalse(TemplateTokenizer.containsPlaceholders("%other:player% %fancycrests:"))
+        assertTrue(TemplateTokenizer.containsPlaceholders("%other:player% %fancycrests:"))
     }
 
     @Test

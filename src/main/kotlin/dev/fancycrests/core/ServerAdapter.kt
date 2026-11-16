@@ -30,6 +30,9 @@ interface ServerAdapter {
      */
     fun profileName(uuid: UUID): String?
 
+    /** Resolve a provider token for an online player; null means unavailable. Main thread. */
+    fun externalPlaceholder(token: String, uuid: UUID): net.minecraft.network.chat.Component? = null
+
     /**
      * Resolves an exact (case-insensitive) online player name to its UUID, or
      * null when no online player matches. Nicknames are never consulted.
@@ -136,6 +139,18 @@ class MinecraftServerAdapter(private val server: net.minecraft.server.MinecraftS
 
     override fun profileName(uuid: UUID): String? =
         server.playerList.getPlayer(uuid)?.gameProfile?.name()
+
+    override fun externalPlaceholder(token: String, uuid: UUID): net.minecraft.network.chat.Component? {
+        val player = server.playerList.getPlayer(uuid) ?: return null
+        val loader = net.fabricmc.loader.api.FabricLoader.getInstance()
+        if (loader.isModLoaded("placeholder-api")) {
+            dev.fancycrests.adapter.placeholderapi.PlaceholderApiImport.resolve(player, token)?.let { return it }
+        }
+        if (loader.isModLoaded("luckperms")) {
+            dev.fancycrests.adapter.luckperms.LuckPermsPlaceholders.resolve(uuid, token)?.let { return it }
+        }
+        return null
+    }
 
     override fun playerNameExact(name: String): UUID? =
         server.playerList.getPlayerByName(name)?.gameProfile?.id()

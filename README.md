@@ -134,7 +134,7 @@ Title text, nickname input, `separatorStyle` and static template text all suppor
 
 ## Placeholders
 
-Second-line templates and the Text Placeholder API export share the same placeholder registry:
+Templates can use `%player%`, the placeholders below, named conditions, and placeholders registered by other mods through Fabric Text Placeholder API:
 
 | Placeholder | Value |
 | --- | --- |
@@ -143,10 +143,29 @@ Second-line templates and the Text Placeholder API export share the same placeho
 | `%fancycrests:nickname%` | Nickname, or the current profile name if unset |
 | `%fancycrests:belowname%` | Resolved administrator second line; empty when no rule matches |
 
+Define reusable conditional placeholders in the YAML file:
+
+```yaml
+conditions:
+  nickname:
+    conditions:
+      - "%player%=%player:displayname%"
+    true: "%player%"
+    false: "~%player:displayname%"
+  example:
+    conditions: ["%player%=TestPlayer", "permission:example.staff"]
+    type: AND
+    true: "&bStaff %condition:nickname%"
+    false: ""
+```
+
+Use `%condition:nickname%` in a template. `type` defaults to `AND` and can also be `OR`. Comparisons support `=`, `==`, `!=`, `<`, `<=`, `>` and `>=`; ordering comparisons require numbers. References to missing or cyclic conditions are configuration errors. Missing external placeholders remain visible as written and do not produce a successful comparison.
+
 ## Integrations
 
 - **LuckPerms**: When Fabric LuckPerms is detected, the mod registers the `luckperms` backend after the built-in backend. Explicit allow or deny rules take precedence; undefined nodes fall back to the defaults described above. Permission changes are rechecked on the main thread so titles that are no longer allowed are removed promptly.
-- **Text Placeholder API**: When detected, the mod exports the four placeholders above for chat, TAB lists or other compatible plugins and mods. Fancy Crests continues to work normally without it.
+- **Text Placeholder API**: When installed, templates can read registered provider placeholders such as `%player:displayname%`, `%player:statistic_raw used netherite_hoe%`, or TAB's Fabric exports. Each provider and its compatible version must actually be installed. Bukkit-only Essentials/PlaceholderAPI expansions are not available on a Fabric server unless an appropriate bridge supplies them. The four Fancy Crests placeholders can also be exported to other mods when `channels.placeholdersExport` is enabled.
+- **LuckPerms placeholders**: With Fabric LuckPerms installed, `%luckperms:prefix%`, `%luckperms:suffix%`, `%luckperms:primary_group_name%` and `%luckperms:meta key%` work directly; other tokens require a compatible provider.
 
 ## License
 
