@@ -20,7 +20,12 @@ internal object PlaceholderApiImport {
                 Placeholders.parseCommonPlaceholder(identifier, pieces.getOrNull(1), context)
             else -> null
         }
-        if (result != null && result.isValid) return result.component()
+        if (result != null && result.isValid) {
+            // TAB's Fabric expansion returns legacy codes inside a literal
+            // string; other providers may return structured, styled Components.
+            return if (pieces[0].startsWith("tab:")) LegacyTextParser.parse(result.component().string)
+                else result.component()
+        }
 
         // TAB exposes its own variable registry as this Fabric placeholder.
         // It returns the original token when its providers cannot resolve it.
