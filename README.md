@@ -73,7 +73,7 @@ Click the buttons at the top right of the menu to switch between the prefix, suf
 | `grant <player> <titleId>` | Add a local title ownership record |
 | `revoke <player> <titleId>` | Revoke a local title ownership record |
 | `inspect <player>` | Show the player's state, ownership and equipped titles |
-| `preview <player>` | Resolve the first and second lines without changing state |
+| `preview <player>` | Resolve the legacy and configured head lines without changing state |
 | `reload` | Atomically reload the configuration |
 | `validate` | Validate the configuration file on disk without applying it |
 | `diagnose` | Show channel, permission backend, catalog and storage status |

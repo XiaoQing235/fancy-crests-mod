@@ -399,6 +399,15 @@ object FancyCrestsCommands {
         } else {
             source.success("  Second line: (no rule matched)")
         }
+        val head = core.snapshotResolver.resolveFor(
+            core.configService.current.channels.headRenderTemplate, state, profileName, dimension, includeHeadLines = true,
+        )
+        head.headLines?.forEachIndexed { index, line ->
+            source.success(
+                Component.literal("  Head line ${index + 1} (seeThrough=${line.seeThrough}, selfVisible=${line.selfVisible}): ")
+                    .append(line.text.copy()),
+            )
+        }
         source.success("  Nickname in use: ${state.nickname ?: "(profile name)"}")
         return Command.SINGLE_SUCCESS
     }

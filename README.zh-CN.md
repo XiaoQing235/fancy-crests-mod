@@ -73,7 +73,7 @@
 | `grant <player> <titleId>`  | 添加本地称号所有权记录             |
 | `revoke <player> <titleId>` | 撤销本地称号所有权记录             |
 | `inspect <player>`          | 显示玩家状态、所有权和已装备称号   |
-| `preview <player>`          | 解析第一行和第二行，但不修改状态   |
+| `preview <player>`          | 解析旧版及自定义头顶文字，但不修改状态 |
 | `reload`                    | 原子重载配置                       |
 | `validate`                  | 校验磁盘上的配置文件，但不应用配置 |
 | `diagnose`                  | 查看通道、权限后端、目录和存储状态 |
